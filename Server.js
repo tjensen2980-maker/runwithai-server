@@ -4,13 +4,129 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const app = express();
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// STRIPE SETUP - Tilføjet til subscription system
+// ═══════════════════════════════════════════════════════════════════════════════
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+
+// VIGTIGT: Stripe webhook SKAL være FØR express.json() middleware
+// fordi Stripe kræver raw body til signature verification
+app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+  
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Webhook signature verification failed:', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+  
+  // Håndter forskellige event typer
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object;
+      const userId = session.metadata?.userId;
+      const subscriptionId = session.subscription;
+      
+      if (userId && subscriptionId) {
+        const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+        
+        await db.query(`
+          UPDATE users SET 
+            subscription_tier = 'pro',
+            subscription_status = 'active',
+            stripe_subscription_id = $1,
+            subscription_ends_at = to_timestamp($2)
+          WHERE id = $3
+        `, [subscriptionId, subscription.current_period_end, userId]);
+        
+        console.log(`✅ User ${userId} upgraded to Pro!`);
+      }
+      break;
+    }
+    
+    case 'customer.subscription.updated': {
+      const subscription = event.data.object;
+      const customerId = subscription.customer;
+      
+      const user = await db.query('SELECT id FROM users WHERE stripe_customer_id = $1', [customerId]);
+      if (user.rows[0]) {
+        const status = subscription.status;
+        const tier = status === 'active' ? 'pro' : 'free';
+        
+        await db.query(`
+          UPDATE users SET 
+            subscription_tier = $1,
+            subscription_status = $2,
+            subscription_ends_at = to_timestamp($3)
+          WHERE id = $4
+        `, [tier, status, subscription.current_period_end, user.rows[0].id]);
+      }
+      break;
+    }
+    
+    case 'customer.subscription.deleted': {
+      const subscription = event.data.object;
+      const customerId = subscription.customer;
+      
+      await db.query(`
+        UPDATE users SET 
+          subscription_tier = 'free',
+          subscription_status = 'cancelled',
+          stripe_subscription_id = NULL
+        WHERE stripe_customer_id = $1
+      `, [customerId]);
+      
+      console.log(`⚠️ Subscription cancelled for customer ${customerId}`);
+      break;
+    }
+    
+    case 'invoice.payment_failed': {
+      const invoice = event.data.object;
+      const customerId = invoice.customer;
+      
+      await db.query(`
+        UPDATE users SET subscription_status = 'past_due'
+        WHERE stripe_customer_id = $1
+      `, [customerId]);
+      
+      console.log(`⚠️ Payment failed for customer ${customerId}`);
+      break;
+    }
+  }
+  
+  res.json({ received: true });
+});
+
+// Standard middleware EFTER webhook route
 app.use(cors());
 app.use(express.json());
 
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 const JWT_SECRET = process.env.JWT_SECRET || 'runwithai-secret-2026';
 
-// ─── DATABASE SETUP ───────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUBSCRIPTION TIERS
+// ═══════════════════════════════════════════════════════════════════════════════
+const TIERS = {
+  free: {
+    name: 'Free',
+    maxRunsPerMonth: 10,
+    features: ['basic_tracking', 'weekly_stats']
+  },
+  pro: {
+    name: 'Pro',
+    maxRunsPerMonth: Infinity,
+    features: [
+      'basic_tracking', 'weekly_stats', 'unlimited_runs',
+      'ai_coach', 'badges', 'streaks', 'pulse_zones',
+      'garmin_sync', 'social_feed', 'export_data'
+    ]
+  }
+};
+
+// ─── DATABASE SETUP ─────────────────────────────────────────────────────────────
 let db;
 if (process.env.DATABASE_URL) {
   const { Pool } = require('pg');
@@ -96,14 +212,13 @@ if (process.env.DATABASE_URL) {
       updated_at TIMESTAMP DEFAULT NOW()
     );
   `).then(() => {
-  console.log('Database klar ✓');
-  // Migrer runs tabel med nye kolonner
-  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS splits TEXT').catch(() => {});
-  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS shoe_id TEXT').catch(() => {});
-  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS route TEXT').catch(() => {});
-  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS notes TEXT').catch(() => {});
-  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS date TIMESTAMP DEFAULT NOW()').catch(() => {});
-}).catch(e => console.error('DB setup fejl:', e));
+    console.log('Database klar ✓');
+    db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS splits TEXT').catch(() => {});
+    db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS shoe_id TEXT').catch(() => {});
+    db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS route TEXT').catch(() => {});
+    db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS notes TEXT').catch(() => {});
+    db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS date TIMESTAMP DEFAULT NOW()').catch(() => {});
+  }).catch(e => console.error('DB setup fejl:', e));
 } else {
   const Database = require('better-sqlite3');
   const sqliteDb = new Database('runwithai.db');
@@ -136,11 +251,8 @@ if (process.env.DATABASE_URL) {
   `);
   db = {
     query: async (text, params = []) => {
-      const isPg = false;
-      // Convert $1,$2 to ? for sqlite
       let sqliteText = text.replace(/\$\d+/g, '?');
-      if (sqliteText.trim().toUpperCase().startsWith('SELECT') ||
-          sqliteText.trim().toUpperCase().startsWith('WITH')) {
+      if (sqliteText.trim().toUpperCase().startsWith('SELECT') || sqliteText.trim().toUpperCase().startsWith('WITH')) {
         const rows = sqliteDb.prepare(sqliteText).all(...params);
         return { rows };
       } else if (sqliteText.trim().toUpperCase().includes('RETURNING')) {
@@ -160,7 +272,7 @@ if (process.env.DATABASE_URL) {
   console.log('Database klar ✓');
 }
 
-// ─── AUTH MIDDLEWARE ──────────────────────────────────────────────────────────
+// ─── AUTH MIDDLEWARE ────────────────────────────────────────────────────────────
 function authMiddleware(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'Ikke logget ind' });
@@ -172,7 +284,121 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ─── AUTH ENDPOINTS ───────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// SUBSCRIPTION ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// GET subscription status
+app.get('/subscription', authMiddleware, async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT subscription_tier, subscription_status, subscription_ends_at, 
+             stripe_customer_id, stripe_subscription_id
+      FROM users WHERE id = $1
+    `, [req.user.id]);
+    
+    const user = result.rows[0];
+    const tier = user?.subscription_tier || 'free';
+    
+    // Tjek om Pro er udløbet
+    if (tier === 'pro' && user.subscription_ends_at) {
+      const endsAt = new Date(user.subscription_ends_at);
+      if (endsAt < new Date() && user.subscription_status !== 'active') {
+        await db.query(`UPDATE users SET subscription_tier = 'free' WHERE id = $1`, [req.user.id]);
+        return res.json({ tier: 'free', features: TIERS.free.features });
+      }
+    }
+    
+    // Tæl løb denne måned
+    const runsThisMonth = await db.query(`
+      SELECT COUNT(*) FROM runs 
+      WHERE user_id = $1 
+      AND date >= date_trunc('month', CURRENT_DATE)
+    `, [req.user.id]);
+    
+    res.json({
+      tier,
+      status: user?.subscription_status || 'none',
+      endsAt: user?.subscription_ends_at,
+      features: TIERS[tier]?.features || TIERS.free.features,
+      runsThisMonth: parseInt(runsThisMonth.rows[0]?.count || 0),
+      maxRunsPerMonth: TIERS[tier]?.maxRunsPerMonth || 10,
+      canTrackRun: tier === 'pro' || parseInt(runsThisMonth.rows[0]?.count || 0) < TIERS.free.maxRunsPerMonth
+    });
+  } catch (err) {
+    console.error('Subscription error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente abonnement' });
+  }
+});
+
+// Create checkout session
+app.post('/create-checkout-session', authMiddleware, async (req, res) => {
+  try {
+    const { interval } = req.body; // 'monthly' eller 'yearly'
+    
+    // Hent eller opret Stripe customer
+    let user = await db.query('SELECT email, stripe_customer_id FROM users WHERE id = $1', [req.user.id]);
+    let customerId = user.rows[0]?.stripe_customer_id;
+    
+    if (!customerId) {
+      const customer = await stripe.customers.create({
+        email: user.rows[0].email,
+        metadata: { userId: req.user.id.toString() }
+      });
+      customerId = customer.id;
+      await db.query('UPDATE users SET stripe_customer_id = $1 WHERE id = $2', [customerId, req.user.id]);
+    }
+    
+    // Vælg pris baseret på interval
+    const stripePriceId = interval === 'yearly' 
+      ? process.env.STRIPE_PRICE_PRO_YEARLY 
+      : process.env.STRIPE_PRICE_PRO_MONTHLY;
+    
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      payment_method_types: ['card'],
+      line_items: [{
+        price: stripePriceId,
+        quantity: 1,
+      }],
+      mode: 'subscription',
+      success_url: `${process.env.APP_URL || 'https://dist-lilac-zeta-14.vercel.app'}/?subscription=success`,
+      cancel_url: `${process.env.APP_URL || 'https://dist-lilac-zeta-14.vercel.app'}/pricing?subscription=cancelled`,
+      metadata: {
+        userId: req.user.id.toString()
+      }
+    });
+    
+    res.json({ sessionId: session.id, url: session.url });
+  } catch (err) {
+    console.error('Checkout error:', err);
+    res.status(500).json({ error: 'Kunne ikke oprette checkout' });
+  }
+});
+
+// Create customer portal session (til at administrere abonnement)
+app.post('/create-portal-session', authMiddleware, async (req, res) => {
+  try {
+    const user = await db.query('SELECT stripe_customer_id FROM users WHERE id = $1', [req.user.id]);
+    const customerId = user.rows[0]?.stripe_customer_id;
+    
+    if (!customerId) {
+      return res.status(400).json({ error: 'Ingen abonnement fundet' });
+    }
+    
+    const session = await stripe.billingPortal.sessions.create({
+      customer: customerId,
+      return_url: `${process.env.APP_URL || 'https://dist-lilac-zeta-14.vercel.app'}/settings`,
+    });
+    
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error('Portal error:', err);
+    res.status(500).json({ error: 'Kunne ikke åbne kundeportal' });
+  }
+});
+
+// ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────────────
 app.post('/auth/register', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email og adgangskode kræves' });
@@ -180,8 +406,8 @@ app.post('/auth/register', async (req, res) => {
   try {
     const hashed = await bcrypt.hash(password, 10);
     const result = await db.query(
-      'INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id, email',
-      [email.toLowerCase().trim(), hashed]
+      'INSERT INTO users (email, password, subscription_tier, subscription_status) VALUES ($1, $2, $3, $4) RETURNING id, email',
+      [email.toLowerCase().trim(), hashed, 'free', 'none']
     );
     const user = result.rows[0];
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' });
@@ -213,13 +439,15 @@ app.post('/auth/login', async (req, res) => {
   }
 });
 
-// ─── PROFILE ──────────────────────────────────────────────────────────────────
+// ─── PROFILE ────────────────────────────────────────────────────────────────────
 app.get('/profile', authMiddleware, async (req, res) => {
   try {
     const result = await db.query('SELECT data FROM profile WHERE user_id = $1', [req.user.id]);
     const row = result.rows[0];
     res.json(row?.data ? JSON.parse(row.data) : {});
-  } catch (e) { res.json({}); }
+  } catch (e) {
+    res.json({});
+  }
 });
 
 app.post('/profile', authMiddleware, async (req, res) => {
@@ -230,39 +458,45 @@ app.post('/profile', authMiddleware, async (req, res) => {
       [req.user.id, req.user.id, JSON.stringify(req.body)]
     );
     res.json({ ok: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl' }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Fejl' });
+  }
 });
 
-// ─── MESSAGES ─────────────────────────────────────────────────────────────────
-// FIX: Hent de nyeste 200 beskeder (ikke kun de første 100)
+// ─── MESSAGES ───────────────────────────────────────────────────────────────────
 app.get('/messages', authMiddleware, async (req, res) => {
   try {
     const result = await db.query(
       `SELECT role, text FROM (
-        SELECT role, text, created_at FROM messages 
-        WHERE user_id = $1 
-        ORDER BY created_at DESC LIMIT 200
+        SELECT role, text, created_at FROM messages WHERE user_id = $1 ORDER BY created_at DESC LIMIT 200
       ) sub ORDER BY created_at ASC`,
       [req.user.id]
     );
     res.json(result.rows);
-  } catch (e) { res.json([]); }
+  } catch (e) {
+    res.json([]);
+  }
 });
 
 app.delete('/messages', authMiddleware, async (req, res) => {
   try {
     await db.query('DELETE FROM messages WHERE user_id = $1', [req.user.id]);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: 'Fejl' }); }
+  } catch (e) {
+    res.status(500).json({ error: 'Fejl' });
+  }
 });
 
-// ─── WEEK PLAN ────────────────────────────────────────────────────────────────
+// ─── WEEK PLAN ──────────────────────────────────────────────────────────────────
 app.get('/weekplan', authMiddleware, async (req, res) => {
   try {
     const result = await db.query('SELECT data FROM week_plan WHERE user_id = $1', [req.user.id]);
     const row = result.rows[0];
     res.json(row?.data ? JSON.parse(row.data) : null);
-  } catch (e) { res.json(null); }
+  } catch (e) {
+    res.json(null);
+  }
 });
 
 app.post('/weekplan', authMiddleware, async (req, res) => {
@@ -273,30 +507,38 @@ app.post('/weekplan', authMiddleware, async (req, res) => {
       [req.user.id, req.user.id, JSON.stringify(req.body)]
     );
     res.json({ ok: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl' }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Fejl' });
+  }
 });
 
-// ─── CHAT ─────────────────────────────────────────────────────────────────────
+// ─── CHAT ───────────────────────────────────────────────────────────────────────
 app.post('/chat', authMiddleware, async (req, res) => {
   try {
     const { messages, system, model, max_tokens } = req.body;
-    // Gem brugerens besked
     const userMsg = messages?.[messages.length - 1];
     if (userMsg?.role === 'user') {
-      await db.query('INSERT INTO messages (user_id, role, text) VALUES ($1, $2, $3)',
-        [req.user.id, 'user', userMsg.content]);
+      await db.query('INSERT INTO messages (user_id, role, text) VALUES ($1, $2, $3)', [req.user.id, 'user', userMsg.content]);
     }
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: model || 'claude-sonnet-4-20250514', max_tokens: max_tokens || 1000, system, messages }),
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: model || 'claude-sonnet-4-20250514',
+        max_tokens: max_tokens || 1000,
+        system,
+        messages
+      }),
     });
     const data = await response.json();
-    // Gem AI svar
     const aiText = data.content?.[0]?.text;
     if (aiText) {
-      await db.query('INSERT INTO messages (user_id, role, text) VALUES ($1, $2, $3)',
-        [req.user.id, 'assistant', aiText]);
+      await db.query('INSERT INTO messages (user_id, role, text) VALUES ($1, $2, $3)', [req.user.id, 'assistant', aiText]);
     }
     res.json(data);
   } catch (e) {
@@ -305,8 +547,7 @@ app.post('/chat', authMiddleware, async (req, res) => {
   }
 });
 
-
-// ─── RUNS ─────────────────────────────────────────────────────────────────────
+// ─── RUNS ───────────────────────────────────────────────────────────────────────
 app.get('/runs', authMiddleware, async (req, res) => {
   try {
     const result = await db.query(
@@ -318,12 +559,16 @@ app.get('/runs', authMiddleware, async (req, res) => {
       let diary = null;
       try {
         const parsed = typeof notes === 'string' ? JSON.parse(notes) : notes;
-        if (parsed && parsed.diary) { diary = parsed.diary; }
+        if (parsed && parsed.diary) {
+          diary = parsed.diary;
+        }
       } catch {}
       return { ...r, diary };
     });
     res.json(runs);
-  } catch (e) { res.json([]); }
+  } catch (e) {
+    res.json([]);
+  }
 });
 
 app.post('/runs', authMiddleware, async (req, res) => {
@@ -334,7 +579,10 @@ app.post('/runs', authMiddleware, async (req, res) => {
       [req.user.id, km, duration_secs, pace_secs_per_km, avg_hr || null, route ? JSON.stringify(route) : null, notes || null, splits ? JSON.stringify(splits) : null, shoe_id || null]
     );
     res.json(result.rows[0]);
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl' }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Fejl' });
+  }
 });
 
 app.delete('/runs/:id', authMiddleware, async (req, res) => {
@@ -345,26 +593,28 @@ app.delete('/runs/:id', authMiddleware, async (req, res) => {
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Løb ikke fundet' });
     res.json({ deleted: true, id: req.params.id });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl' }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Fejl' });
+  }
 });
 
-// ─── PATCH RUN (dagbog/noter) ─────────────────────────────────────────────────
 app.patch('/runs/:id', authMiddleware, async (req, res) => {
   try {
     const { diary } = req.body;
     const result = await db.query(
-      `UPDATE runs SET notes = COALESCE(notes::jsonb || $1::jsonb, $1::jsonb)
-       WHERE id = $2 AND user_id = $3 RETURNING id`,
+      `UPDATE runs SET notes = COALESCE(notes::jsonb || $1::jsonb, $1::jsonb) WHERE id = $2 AND user_id = $3 RETURNING id`,
       [JSON.stringify({ diary }), req.params.id, req.user.id]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Løb ikke fundet' });
     res.json({ ok: true });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl' }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Fejl' });
+  }
 });
 
-
-
-// ─── TRAINING PLAN ────────────────────────────────────────────────────────────
+// ─── TRAINING PLAN ──────────────────────────────────────────────────────────────
 app.get('/trainingplan', authMiddleware, async (req, res) => {
   try {
     const result = await db.query('SELECT data, generated_at FROM training_plan WHERE user_id = $1', [req.user.id]);
@@ -382,6 +632,7 @@ app.post('/trainingplan/generate', authMiddleware, async (req, res) => {
     }).join(', ') || 'ingen tidligere løb';
 
     const prompt = `Du er en professionel løbecoach. Lav en ugentlig træningsplan for denne løber:
+
 Profil: ${profile?.name || 'Løber'}, ${profile?.age || '?'} år, niveau: ${level}
 Ugekilometer mål: ${profile?.weeklyKm || '?'} km, År med løb: ${profile?.yearsRunning || '?'}
 Mål: ${profile?.goal || 'generel fitness'}
@@ -393,28 +644,43 @@ Lav en 7-dages plan. Svar KUN med JSON i dette format, ingen tekst før eller ef
   {"day":"Tir","workout":"Hvile","km":0,"color":"#2a2a2f","type":"rest","description":"aktiv restitution"},
   ...alle 7 dage...
 ]
+
 Type kan være: run, rest, cross. Colors: #c8ff00 (interval), #2ecc71 (roligt), #ff6b35 (tempo), #3a7bd5 (langtur), #a855f7 (styrke), #2a2a2f (hvile).`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1000, messages: [{ role: 'user', content: prompt }] }),
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        messages: [{ role: 'user', content: prompt }]
+      }),
     });
+
     const aiData = await response.json();
     const text = aiData.content?.[0]?.text || '[]';
     let plan;
-    try { plan = JSON.parse(text.replace(/```json|```/g, '').trim()); }
-    catch { plan = []; }
+    try {
+      plan = JSON.parse(text.replace(/```json|```/g, '').trim());
+    } catch {
+      plan = [];
+    }
 
     await db.query(
       'INSERT INTO training_plan (user_id, data, generated_at) VALUES ($1,$2,NOW()) ON CONFLICT (user_id) DO UPDATE SET data=$2, generated_at=NOW()',
       [req.user.id, JSON.stringify(plan)]
     );
     res.json({ data: plan, generated_at: new Date() });
-  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl ved generering' }); }
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Fejl ved generering' });
+  }
 });
 
-// Gem AI coach planændring som træningsplan
 app.post('/trainingplan/save', authMiddleware, async (req, res) => {
   try {
     const { data } = req.body;
@@ -423,17 +689,22 @@ app.post('/trainingplan/save', authMiddleware, async (req, res) => {
       [req.user.id, JSON.stringify(data)]
     );
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: 'Fejl' }); }
+  } catch (e) {
+    res.status(500).json({ error: 'Fejl' });
+  }
 });
 
-// ─── STATUS ───────────────────────────────────────────────────────────────────
-// ─── RACE PREDICTOR ──────────────────────────────────────────────────────────
+// ─── RACE PREDICTOR ─────────────────────────────────────────────────────────────
 app.post('/predict', authMiddleware, async (req, res) => {
   try {
     const { message } = req.body;
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 1500,
@@ -448,27 +719,21 @@ app.post('/predict', authMiddleware, async (req, res) => {
   }
 });
 
-
-// ─── RUTE FORSLAG ────────────────────────────────────────────────────────────
+// ─── RUTE FORSLAG ───────────────────────────────────────────────────────────────
 app.post('/routes/suggest', authMiddleware, async (req, res) => {
   try {
     const { lat, lon, km = 5, type = 'loop', areaName = '', recentPace = '', savedRoutes = [] } = req.body;
-
-    // Byg præference-kontekst fra gemte ruter med stjerner
     const ratedRoutes = (savedRoutes || []).filter(r => r.stars > 0);
     const prefContext = ratedRoutes.length > 0
-      ? `\n\nUser's rated routes (learn preferences):\n${ratedRoutes.map(r =>
-          `- "${r.name}" ${r.stars}/5 stars: ${r.terrain}, ${r.difficulty}${r.note ? `, note: "${r.note}"` : ''}`
-        ).join('\n')}\nUse these to suggest routes that match their preferences.`
+      ? `\n\nUser's rated routes (learn preferences):\n${ratedRoutes.map(r => `- "${r.name}" ${r.stars}/5 stars: ${r.terrain}, ${r.difficulty}${r.note ? `, note: "${r.note}"` : ''}`).join('\n')}\nUse these to suggest routes that match their preferences.`
       : '';
 
     const prompt = `You are a running route planner. The user is near ${areaName || 'Denmark'} at coordinates (${lat}, ${lon}).
-
 Generate exactly 3 running route suggestions of approximately ${km} km as ${type === 'loop' ? 'loop routes' : 'out-and-back routes'}.
 
 CRITICAL: Respond with ONLY a valid JSON array. No markdown, no backticks, no explanation. Start with [ and end with ].
-
-Use real street names, parks, lakes, or landmarks near (${lat}, ${lon}). Generate realistic GPS waypoints that form a logical running path.${prefContext}
+Use real street names, parks, lakes, or landmarks near (${lat}, ${lon}).
+Generate realistic GPS waypoints that form a logical running path.${prefContext}
 
 [
   {
@@ -485,31 +750,18 @@ Use real street names, parks, lakes, or landmarks near (${lat}, ${lon}). Generat
       {"lat": ${lat}, "lon": ${lon}, "name": "Finish"}
     ]
   },
-  {
-    "name": "Route name 2",
-    "km": ${km},
-    "type": "${type}",
-    "terrain": "sti",
-    "difficulty": "moderat",
-    "highlight": "Description in Danish",
-    "waypoints": [...]
-  },
-  {
-    "name": "Route name 3",
-    "km": ${km},
-    "type": "${type}",
-    "terrain": "blandet",
-    "difficulty": "hård",
-    "highlight": "Description in Danish",
-    "waypoints": [...]
-  }
+  ...
 ]
 
 User pace: ${recentPace || 'unknown'}. Make waypoints geographically accurate for the area.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 2000,
@@ -519,11 +771,7 @@ User pace: ${recentPace || 'unknown'}. Make waypoints geographically accurate fo
 
     const data = await response.json();
     let text = data.content?.[0]?.text || '';
-
-    // Strip markdown fences if present
     text = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-
-    // Extract JSON array
     const match = text.match(/\[[\s\S]*\]/);
     if (!match) {
       return res.status(422).json({ error: 'AI returned unexpected format', raw: text.slice(0, 200) });
@@ -533,12 +781,10 @@ User pace: ${recentPace || 'unknown'}. Make waypoints geographically accurate fo
     try {
       routes = JSON.parse(match[0]);
     } catch (parseErr) {
-      // Try to fix common JSON issues (trailing commas)
       const cleaned = match[0].replace(/,\s*([}\]])/g, '$1');
       routes = JSON.parse(cleaned);
     }
 
-    // Ensure waypoints have lat/lon numbers (not strings)
     routes = routes.map(r => ({
       ...r,
       id: Math.random().toString(36).slice(2),
@@ -557,9 +803,7 @@ User pace: ${recentPace || 'unknown'}. Make waypoints geographically accurate fo
   }
 });
 
-// ─── SOCIALE FEATURES ────────────────────────────────────────────────────────
-
-// Del et løb — generér et unikt share-id og gem det
+// ─── SOCIALE FEATURES ───────────────────────────────────────────────────────────
 app.post('/runs/share', authMiddleware, async (req, res) => {
   const { run_id, km, duration_secs, pace_secs_per_km, avg_hr, ai_comment } = req.body;
   const shareId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
@@ -576,7 +820,6 @@ app.post('/runs/share', authMiddleware, async (req, res) => {
   }
 });
 
-// Hent et delt løb — offentligt, ingen auth
 app.get('/shared/:id', async (req, res) => {
   const { rows } = await db.query('SELECT * FROM shared_runs WHERE id = $1', [req.params.id]);
   if (!rows[0]) return res.status(404).json({ error: 'Ikke fundet' });
@@ -584,7 +827,6 @@ app.get('/shared/:id', async (req, res) => {
   res.json({ run: rows[0], kudos: kudosRes.rows });
 });
 
-// Giv kudos på et delt løb
 app.post('/shared/:id/kudos', authMiddleware, async (req, res) => {
   const { emoji } = req.body;
   try {
@@ -599,7 +841,6 @@ app.post('/shared/:id/kudos', authMiddleware, async (req, res) => {
   }
 });
 
-// Send venneanmodning
 app.post('/friends/request', authMiddleware, async (req, res) => {
   const { email } = req.body;
   const { rows } = await db.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -616,12 +857,10 @@ app.post('/friends/request', authMiddleware, async (req, res) => {
   }
 });
 
-// Accepter/afvis venneanmodning
 app.post('/friends/:id/respond', authMiddleware, async (req, res) => {
   const { accept } = req.body;
   if (accept) {
     await db.query('UPDATE friends SET status = $1 WHERE user_id = $2 AND friend_id = $3', ['accepted', req.params.id, req.user.id]);
-    // Tilføj begge veje
     await db.query('INSERT INTO friends (user_id, friend_id, status) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [req.user.id, req.params.id, 'accepted']);
   } else {
     await db.query('DELETE FROM friends WHERE user_id = $1 AND friend_id = $2', [req.params.id, req.user.id]);
@@ -629,7 +868,6 @@ app.post('/friends/:id/respond', authMiddleware, async (req, res) => {
   res.json({ ok: true });
 });
 
-// Hent venner og pending requests
 app.get('/friends', authMiddleware, async (req, res) => {
   const friends = await db.query(`
     SELECT u.id, u.email, p.data as profile_data, f.status
@@ -639,7 +877,6 @@ app.get('/friends', authMiddleware, async (req, res) => {
     WHERE f.user_id = $1
     ORDER BY f.status, f.created_at DESC
   `, [req.user.id]);
-
   const pending = await db.query(`
     SELECT u.id, u.email, p.data as profile_data
     FROM friends f
@@ -647,37 +884,31 @@ app.get('/friends', authMiddleware, async (req, res) => {
     LEFT JOIN profile p ON p.user_id = u.id
     WHERE f.friend_id = $1 AND f.status = 'pending'
   `, [req.user.id]);
-
   res.json({ friends: friends.rows, pending: pending.rows });
 });
 
-// Hent venners seneste løb (feed)
 app.get('/friends/feed', authMiddleware, async (req, res) => {
   const { rows } = await db.query(`
-    SELECT sr.*, 
-           (SELECT COUNT(*) FROM kudos k WHERE k.run_share_id = sr.id) as kudos_count
+    SELECT sr.*, (SELECT COUNT(*) FROM kudos k WHERE k.run_share_id = sr.id) as kudos_count
     FROM shared_runs sr
     WHERE sr.user_id IN (
       SELECT friend_id FROM friends WHERE user_id = $1 AND status = 'accepted'
     )
-    ORDER BY sr.created_at DESC
-    LIMIT 20
+    ORDER BY sr.created_at DESC LIMIT 20
   `, [req.user.id]);
   res.json({ feed: rows });
 });
 
-app.get('/', (req, res) => res.json({ status: 'RunWithAI server kører!' }));
+app.get('/', (req, res) => res.json({ status: 'RunWithAI server kører!', version: '2.0.0-stripe' }));
 
-// ─── NOMINATIM PROXY ──────────────────────────────────────────────────────────
+// ─── NOMINATIM PROXY ────────────────────────────────────────────────────────────
 app.get('/nominatim', async (req, res) => {
   try {
     const q = req.query.q;
     if (!q || q.length < 3) return res.json([]);
-    // Photon API - gratis, ingen rate-limit, OSM-baseret
     const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=5&lang=de&bbox=8.0,54.5,15.5,57.8`;
     const r = await fetch(url, { headers: { 'User-Agent': 'RunWithAI/1.0 (kontakt@runwithai.app)' } });
     const geojson = await r.json();
-    // Konverter GeoJSON til Nominatim-kompatibelt format
     const data = (geojson.features || []).map(f => ({
       display_name: [f.properties.name, f.properties.street, f.properties.city, f.properties.country].filter(Boolean).join(', '),
       lat: String(f.geometry.coordinates[1]),
@@ -689,11 +920,10 @@ app.get('/nominatim', async (req, res) => {
   }
 });
 
-// ─── RUTE-ROUTER: GraphHopper foot proxy ─────────────────────────────────────
+// ─── RUTE-ROUTER ────────────────────────────────────────────────────────────────
 app.post('/routes/ors', async (req, res) => {
   try {
     const { coordinates } = req.body;
-    // Byg GraphHopper URL med waypoints
     const points = coordinates.map(c => `point=${c[1]},${c[0]}`).join('&');
     const url = `https://graphhopper.com/api/1/route?${points}&vehicle=foot&locale=da&key=LijBPDQGfu7Iiq80w3HzwB4RUDJbMbhs6BU0dEnn`;
     const r = await fetch(url);
@@ -704,12 +934,11 @@ app.post('/routes/ors', async (req, res) => {
   }
 });
 
-// ─── OPENAI TTS ──────────────────────────────────────────────────────────────
+// ─── OPENAI TTS ─────────────────────────────────────────────────────────────────
 app.post('/tts', authMiddleware, async (req, res) => {
   try {
     const { text } = req.body;
     if (!text) return res.status(400).json({ error: 'Ingen tekst' });
-
     const response = await fetch('https://api.openai.com/v1/audio/speech', {
       method: 'POST',
       headers: {
@@ -718,18 +947,16 @@ app.post('/tts', authMiddleware, async (req, res) => {
       },
       body: JSON.stringify({
         model: 'tts-1',
-        input: text.slice(0, 500), // max 500 tegn pr. kald
-        voice: 'nova', // lyder naturlig og venlig
+        input: text.slice(0, 500),
+        voice: 'nova',
         response_format: 'mp3',
         speed: 1.0,
       }),
     });
-
     if (!response.ok) {
       const err = await response.text();
       return res.status(500).json({ error: err });
     }
-
     res.setHeader('Content-Type', 'audio/mpeg');
     res.setHeader('Cache-Control', 'no-cache');
     const buffer = await response.arrayBuffer();
@@ -739,7 +966,7 @@ app.post('/tts', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── BADGES & ACHIEVEMENTS ────────────────────────────────────────────────────
+// ─── BADGES & ACHIEVEMENTS ──────────────────────────────────────────────────────
 const BADGE_DEFINITIONS = {
   first_run: { check: (runs) => runs.length >= 1 },
   km_10: { check: (runs) => runs.reduce((s, r) => s + (r.km || 0), 0) >= 10 },
@@ -770,42 +997,28 @@ app.post('/badges/check', authMiddleware, async (req, res) => {
   try {
     const { runs } = req.body;
     if (!runs) return res.json({ newBadges: [] });
-    
-    // Hent allerede optjente badges
     const existing = await db.query('SELECT badge_id FROM badges WHERE user_id = $1', [req.user.id]);
     const existingIds = new Set(existing.rows.map(r => r.badge_id));
-    
     const newBadges = [];
-    
     for (const [badgeId, def] of Object.entries(BADGE_DEFINITIONS)) {
       if (!existingIds.has(badgeId) && def.check(runs)) {
-        await db.query(
-          'INSERT INTO badges (user_id, badge_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-          [req.user.id, badgeId]
-        );
+        await db.query('INSERT INTO badges (user_id, badge_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.user.id, badgeId]);
         newBadges.push(badgeId);
       }
     }
-    
     res.json({ newBadges });
   } catch (e) {
     res.json({ newBadges: [], error: e.message });
   }
 });
 
-// ─── STREAK ───────────────────────────────────────────────────────────────────
+// ─── STREAK ─────────────────────────────────────────────────────────────────────
 app.get('/streak', authMiddleware, async (req, res) => {
   try {
-    const result = await db.query(
-      'SELECT date FROM runs WHERE user_id = $1 ORDER BY date DESC',
-      [req.user.id]
-    );
-    
+    const result = await db.query('SELECT date FROM runs WHERE user_id = $1 ORDER BY date DESC', [req.user.id]);
     if (result.rows.length === 0) {
       return res.json({ currentStreak: 0, longestStreak: 0, lastRunDate: null });
     }
-    
-    // Beregn streak
     const dates = [...new Set(result.rows.map(r => {
       const d = new Date(r.date);
       return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
@@ -829,7 +1042,6 @@ app.get('/streak', authMiddleware, async (req, res) => {
       }
     }
     
-    // Find længste streak
     let longestStreak = currentStreak;
     let tempStreak = 1;
     for (let i = 1; i < dates.length; i++) {
@@ -844,31 +1056,20 @@ app.get('/streak', authMiddleware, async (req, res) => {
     }
     longestStreak = Math.max(longestStreak, tempStreak);
     
-    res.json({ 
-      currentStreak, 
-      longestStreak, 
-      lastRunDate: dates[0],
-      ranToday: dates[0] === todayStr
-    });
+    res.json({ currentStreak, longestStreak, lastRunDate: dates[0], ranToday: dates[0] === todayStr });
   } catch (e) {
     res.json({ currentStreak: 0, longestStreak: 0, error: e.message });
   }
 });
 
-// ─── COMMENTS ─────────────────────────────────────────────────────────────────
+// ─── COMMENTS ───────────────────────────────────────────────────────────────────
 app.post('/shared/:id/comment', authMiddleware, async (req, res) => {
   try {
     const { comment } = req.body;
     if (!comment || comment.trim().length === 0) {
       return res.status(400).json({ error: 'Kommentar påkrævet' });
     }
-    
-    await db.query(
-      'INSERT INTO comments (run_share_id, user_id, comment) VALUES ($1, $2, $3)',
-      [req.params.id, req.user.id, comment.trim()]
-    );
-    
-    // Hent alle kommentarer
+    await db.query('INSERT INTO comments (run_share_id, user_id, comment) VALUES ($1, $2, $3)', [req.params.id, req.user.id, comment.trim()]);
     const result = await db.query(`
       SELECT c.*, u.email, p.data as profile_data
       FROM comments c
@@ -877,7 +1078,6 @@ app.post('/shared/:id/comment', authMiddleware, async (req, res) => {
       WHERE c.run_share_id = $1
       ORDER BY c.created_at ASC
     `, [req.params.id]);
-    
     const comments = result.rows.map(r => ({
       id: r.id,
       comment: r.comment,
@@ -887,7 +1087,6 @@ app.post('/shared/:id/comment', authMiddleware, async (req, res) => {
         name: r.profile_data ? JSON.parse(r.profile_data).name : r.email.split('@')[0],
       }
     }));
-    
     res.json({ comments });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -904,7 +1103,6 @@ app.get('/shared/:id/comments', async (req, res) => {
       WHERE c.run_share_id = $1
       ORDER BY c.created_at ASC
     `, [req.params.id]);
-    
     const comments = result.rows.map(r => ({
       id: r.id,
       comment: r.comment,
@@ -914,19 +1112,17 @@ app.get('/shared/:id/comments', async (req, res) => {
         name: r.profile_data ? JSON.parse(r.profile_data).name : r.email.split('@')[0],
       }
     }));
-    
     res.json({ comments });
   } catch (e) {
     res.json({ comments: [] });
   }
 });
 
-// ─── ENHANCED SOCIAL FEED ─────────────────────────────────────────────────────
+// ─── ENHANCED SOCIAL FEED ───────────────────────────────────────────────────────
 app.get('/feed', authMiddleware, async (req, res) => {
   try {
     const { rows } = await db.query(`
-      SELECT 
-        sr.*,
+      SELECT sr.*,
         (SELECT COUNT(*) FROM kudos k WHERE k.run_share_id = sr.id) as kudos_count,
         (SELECT COUNT(*) FROM comments c WHERE c.run_share_id = sr.id) as comment_count,
         (SELECT emoji FROM kudos WHERE run_share_id = sr.id AND from_user_id = $1) as my_kudos
@@ -934,11 +1130,9 @@ app.get('/feed', authMiddleware, async (req, res) => {
       WHERE sr.user_id IN (
         SELECT friend_id FROM friends WHERE user_id = $1 AND status = 'accepted'
       ) OR sr.user_id = $1
-      ORDER BY sr.created_at DESC
-      LIMIT 50
+      ORDER BY sr.created_at DESC LIMIT 50
     `, [req.user.id]);
     
-    // Tilføj kommentarer til hver post
     for (const row of rows) {
       const comments = await db.query(`
         SELECT c.comment, c.created_at, u.email, p.data as profile_data
@@ -946,34 +1140,24 @@ app.get('/feed', authMiddleware, async (req, res) => {
         JOIN users u ON u.id = c.user_id
         LEFT JOIN profile p ON p.user_id = u.id
         WHERE c.run_share_id = $1
-        ORDER BY c.created_at DESC
-        LIMIT 3
+        ORDER BY c.created_at DESC LIMIT 3
       `, [row.id]);
-      
       row.recentComments = comments.rows.map(c => ({
         comment: c.comment,
         createdAt: c.created_at,
         userName: c.profile_data ? JSON.parse(c.profile_data).name : c.email.split('@')[0],
       }));
     }
-    
     res.json({ feed: rows });
   } catch (e) {
     res.json({ feed: [], error: e.message });
   }
 });
 
-// ─── GARMIN CONNECT INTEGRATION ───────────────────────────────────────────────
-// Note: Garmin Connect API kræver partner-aftale med Garmin
-// Dette er placeholder endpoints - kræver rigtige API credentials
-
+// ─── INTEGRATIONS ───────────────────────────────────────────────────────────────
 app.get('/integrations/status', authMiddleware, async (req, res) => {
   try {
-    const result = await db.query(
-      'SELECT garmin_token, apple_health_enabled FROM integrations WHERE user_id = $1',
-      [req.user.id]
-    );
-    
+    const result = await db.query('SELECT garmin_token, apple_health_enabled FROM integrations WHERE user_id = $1', [req.user.id]);
     res.json({
       garmin: !!result.rows[0]?.garmin_token,
       appleHealth: !!result.rows[0]?.apple_health_enabled,
@@ -985,17 +1169,7 @@ app.get('/integrations/status', authMiddleware, async (req, res) => {
 
 app.post('/integrations/garmin/connect', authMiddleware, async (req, res) => {
   try {
-    const { authCode } = req.body;
-    
-    // TODO: Exchange auth code for access token via Garmin OAuth
-    // Dette kræver Garmin Developer Partner aftale
-    // Se: https://developer.garmin.com/connect-iq/api-docs/
-    
-    // Placeholder response
-    res.json({ 
-      success: false, 
-      message: 'Garmin integration kræver partner-aftale. Kontakt support.' 
-    });
+    res.json({ success: false, message: 'Garmin integration kræver partner-aftale. Kontakt support.' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -1003,10 +1177,7 @@ app.post('/integrations/garmin/connect', authMiddleware, async (req, res) => {
 
 app.post('/integrations/garmin/disconnect', authMiddleware, async (req, res) => {
   try {
-    await db.query(
-      'UPDATE integrations SET garmin_token = NULL, garmin_refresh_token = NULL WHERE user_id = $1',
-      [req.user.id]
-    );
+    await db.query('UPDATE integrations SET garmin_token = NULL, garmin_refresh_token = NULL WHERE user_id = $1', [req.user.id]);
     res.json({ success: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -1015,59 +1186,43 @@ app.post('/integrations/garmin/disconnect', authMiddleware, async (req, res) => 
 
 app.post('/integrations/garmin/sync', authMiddleware, async (req, res) => {
   try {
-    // Check for existing Garmin connection
-    const result = await db.query(
-      'SELECT garmin_token FROM integrations WHERE user_id = $1',
-      [req.user.id]
-    );
-    
+    const result = await db.query('SELECT garmin_token FROM integrations WHERE user_id = $1', [req.user.id]);
     if (!result.rows[0]?.garmin_token) {
       return res.status(400).json({ error: 'Garmin ikke forbundet' });
     }
-    
-    // TODO: Fetch activities from Garmin Connect API
-    // Kræver valid access token
-    
     res.json({ activities: [], message: 'Sync ikke implementeret endnu' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// ─── APPLE HEALTH IMPORT ──────────────────────────────────────────────────────
 app.post('/integrations/apple-health/import', authMiddleware, async (req, res) => {
   try {
     const { workouts } = req.body;
     if (!workouts || !Array.isArray(workouts)) {
       return res.status(400).json({ error: 'Ingen workouts data' });
     }
-    
     let imported = 0;
     for (const workout of workouts) {
-      // Konverter Apple Health format til RunWithAI format
       const run = {
-        km: workout.totalDistance / 1000, // meters to km
+        km: workout.totalDistance / 1000,
         duration_secs: workout.duration,
         pace_secs_per_km: workout.duration / (workout.totalDistance / 1000),
         avg_hr: workout.averageHeartRate || null,
         date: workout.startDate,
         notes: JSON.stringify({ source: 'apple_health', originalId: workout.uuid }),
       };
-      
       await db.query(
         'INSERT INTO runs (user_id, km, duration_secs, pace_secs_per_km, avg_hr, date, notes) VALUES ($1,$2,$3,$4,$5,$6,$7)',
         [req.user.id, run.km, run.duration_secs, run.pace_secs_per_km, run.avg_hr, run.date, run.notes]
       );
       imported++;
     }
-    
-    // Opdater integration status
     await db.query(
       `INSERT INTO integrations (user_id, apple_health_enabled) VALUES ($1, TRUE)
        ON CONFLICT (user_id) DO UPDATE SET apple_health_enabled = TRUE, updated_at = NOW()`,
       [req.user.id]
     );
-    
     res.json({ imported, message: `${imported} løb importeret fra Apple Health` });
   } catch (e) {
     res.status(500).json({ error: e.message });
