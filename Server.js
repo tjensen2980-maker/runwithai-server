@@ -45,7 +45,43 @@ if (process.env.DATABASE_URL) {
       data TEXT,
       updated_at TIMESTAMP DEFAULT NOW()
     );
-  `).then(() => console.log('Database klar ✓')).catch(e => console.error('DB setup fejl:', e));
+    CREATE TABLE IF NOT EXISTS shared_runs (
+      id TEXT PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id),
+      run_id INTEGER,
+      name TEXT,
+      km REAL,
+      duration_secs INTEGER,
+      pace_secs_per_km REAL,
+      avg_hr INTEGER,
+      ai_comment TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS friends (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id),
+      friend_id INTEGER REFERENCES users(id),
+      status TEXT DEFAULT 'pending',
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(user_id, friend_id)
+    );
+    CREATE TABLE IF NOT EXISTS kudos (
+      id SERIAL PRIMARY KEY,
+      run_share_id TEXT REFERENCES shared_runs(id),
+      from_user_id INTEGER REFERENCES users(id),
+      emoji TEXT DEFAULT '🔥',
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(run_share_id, from_user_id)
+    );
+  `).then(() => {
+  console.log('Database klar ✓');
+  // Migrer runs tabel med nye kolonner
+  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS splits TEXT').catch(() => {});
+  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS shoe_id TEXT').catch(() => {});
+  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS route TEXT').catch(() => {});
+  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS notes TEXT').catch(() => {});
+  db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS date TIMESTAMP DEFAULT NOW()').catch(() => {});
+}).catch(e => console.error('DB setup fejl:', e));
 } else {
   const Database = require('better-sqlite3');
   const sqliteDb = new Database('runwithai.db');
@@ -176,10 +212,15 @@ app.post('/profile', authMiddleware, async (req, res) => {
 });
 
 // ─── MESSAGES ─────────────────────────────────────────────────────────────────
+// FIX: Hent de nyeste 200 beskeder (ikke kun de første 100)
 app.get('/messages', authMiddleware, async (req, res) => {
   try {
     const result = await db.query(
-      'SELECT role, text FROM messages WHERE user_id = $1 ORDER BY created_at ASC LIMIT 100',
+      `SELECT role, text FROM (
+        SELECT role, text, created_at FROM messages 
+        WHERE user_id = $1 
+        ORDER BY created_at DESC LIMIT 200
+      ) sub ORDER BY created_at ASC`,
       [req.user.id]
     );
     res.json(result.rows);
@@ -242,8 +283,439 @@ app.post('/chat', authMiddleware, async (req, res) => {
   }
 });
 
+
+// ─── RUNS ─────────────────────────────────────────────────────────────────────
+app.get('/runs', authMiddleware, async (req, res) => {
+  try {
+    const result = await db.query(
+      'SELECT * FROM runs WHERE user_id = $1 ORDER BY date DESC LIMIT 50',
+      [req.user.id]
+    );
+    const runs = result.rows.map(r => {
+      let notes = r.notes;
+      let diary = null;
+      try {
+        const parsed = typeof notes === 'string' ? JSON.parse(notes) : notes;
+        if (parsed && parsed.diary) { diary = parsed.diary; }
+      } catch {}
+      return { ...r, diary };
+    });
+    res.json(runs);
+  } catch (e) { res.json([]); }
+});
+
+app.post('/runs', authMiddleware, async (req, res) => {
+  try {
+    const { km, duration_secs, pace_secs_per_km, avg_hr, route, notes, splits, shoe_id } = req.body;
+    const result = await db.query(
+      'INSERT INTO runs (user_id, km, duration_secs, pace_secs_per_km, avg_hr, route, notes, splits, shoe_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',
+      [req.user.id, km, duration_secs, pace_secs_per_km, avg_hr || null, route ? JSON.stringify(route) : null, notes || null, splits ? JSON.stringify(splits) : null, shoe_id || null]
+    );
+    res.json(result.rows[0]);
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl' }); }
+});
+
+app.delete('/runs/:id', authMiddleware, async (req, res) => {
+  try {
+    const result = await db.query(
+      'DELETE FROM runs WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.user.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Løb ikke fundet' });
+    res.json({ deleted: true, id: req.params.id });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl' }); }
+});
+
+// ─── PATCH RUN (dagbog/noter) ─────────────────────────────────────────────────
+app.patch('/runs/:id', authMiddleware, async (req, res) => {
+  try {
+    const { diary } = req.body;
+    const result = await db.query(
+      `UPDATE runs SET notes = COALESCE(notes::jsonb || $1::jsonb, $1::jsonb)
+       WHERE id = $2 AND user_id = $3 RETURNING id`,
+      [JSON.stringify({ diary }), req.params.id, req.user.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Løb ikke fundet' });
+    res.json({ ok: true });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl' }); }
+});
+
+
+
+// ─── TRAINING PLAN ────────────────────────────────────────────────────────────
+app.get('/trainingplan', authMiddleware, async (req, res) => {
+  try {
+    const result = await db.query('SELECT data, generated_at FROM training_plan WHERE user_id = $1', [req.user.id]);
+    res.json(result.rows[0] ? { data: JSON.parse(result.rows[0].data), generated_at: result.rows[0].generated_at } : null);
+  } catch { res.json(null); }
+});
+
+app.post('/trainingplan/generate', authMiddleware, async (req, res) => {
+  try {
+    const { profile, level, recentRuns } = req.body;
+    const runSummary = recentRuns?.slice(0,5).map(r => {
+      const mins = Math.floor(r.duration_secs/60);
+      const pace = r.pace_secs_per_km ? `${Math.floor(r.pace_secs_per_km/60)}:${String(Math.round(r.pace_secs_per_km%60)).padStart(2,'0')}/km` : '?';
+      return `${r.km?.toFixed(1)}km på ${mins}min (${pace})`;
+    }).join(', ') || 'ingen tidligere løb';
+
+    const prompt = `Du er en professionel løbecoach. Lav en ugentlig træningsplan for denne løber:
+Profil: ${profile?.name || 'Løber'}, ${profile?.age || '?'} år, niveau: ${level}
+Ugekilometer mål: ${profile?.weeklyKm || '?'} km, År med løb: ${profile?.yearsRunning || '?'}
+Mål: ${profile?.goal || 'generel fitness'}
+Seneste løb: ${runSummary}
+
+Lav en 7-dages plan. Svar KUN med JSON i dette format, ingen tekst før eller efter:
+[
+  {"day":"Man","workout":"navn","km":8,"color":"#c8ff00","type":"run","description":"kort beskrivelse"},
+  {"day":"Tir","workout":"Hvile","km":0,"color":"#2a2a2f","type":"rest","description":"aktiv restitution"},
+  ...alle 7 dage...
+]
+Type kan være: run, rest, cross. Colors: #c8ff00 (interval), #2ecc71 (roligt), #ff6b35 (tempo), #3a7bd5 (langtur), #a855f7 (styrke), #2a2a2f (hvile).`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-20250514', max_tokens: 1000, messages: [{ role: 'user', content: prompt }] }),
+    });
+    const aiData = await response.json();
+    const text = aiData.content?.[0]?.text || '[]';
+    let plan;
+    try { plan = JSON.parse(text.replace(/```json|```/g, '').trim()); }
+    catch { plan = []; }
+
+    await db.query(
+      'INSERT INTO training_plan (user_id, data, generated_at) VALUES ($1,$2,NOW()) ON CONFLICT (user_id) DO UPDATE SET data=$2, generated_at=NOW()',
+      [req.user.id, JSON.stringify(plan)]
+    );
+    res.json({ data: plan, generated_at: new Date() });
+  } catch (e) { console.error(e); res.status(500).json({ error: 'Fejl ved generering' }); }
+});
+
+// Gem AI coach planændring som træningsplan
+app.post('/trainingplan/save', authMiddleware, async (req, res) => {
+  try {
+    const { data } = req.body;
+    await db.query(
+      'INSERT INTO training_plan (user_id, data, generated_at) VALUES ($1,$2,NOW()) ON CONFLICT (user_id) DO UPDATE SET data=$2, generated_at=NOW()',
+      [req.user.id, JSON.stringify(data)]
+    );
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'Fejl' }); }
+});
+
 // ─── STATUS ───────────────────────────────────────────────────────────────────
+// ─── RACE PREDICTOR ──────────────────────────────────────────────────────────
+app.post('/predict', authMiddleware, async (req, res) => {
+  try {
+    const { message } = req.body;
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: message }],
+      }),
+    });
+    const data = await response.json();
+    const reply = data.content?.[0]?.text || '';
+    res.json({ reply });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// ─── RUTE FORSLAG ────────────────────────────────────────────────────────────
+app.post('/routes/suggest', authMiddleware, async (req, res) => {
+  try {
+    const { lat, lon, km = 5, type = 'loop', areaName = '', recentPace = '', savedRoutes = [] } = req.body;
+
+    // Byg præference-kontekst fra gemte ruter med stjerner
+    const ratedRoutes = (savedRoutes || []).filter(r => r.stars > 0);
+    const prefContext = ratedRoutes.length > 0
+      ? `\n\nUser's rated routes (learn preferences):\n${ratedRoutes.map(r =>
+          `- "${r.name}" ${r.stars}/5 stars: ${r.terrain}, ${r.difficulty}${r.note ? `, note: "${r.note}"` : ''}`
+        ).join('\n')}\nUse these to suggest routes that match their preferences.`
+      : '';
+
+    const prompt = `You are a running route planner. The user is near ${areaName || 'Denmark'} at coordinates (${lat}, ${lon}).
+
+Generate exactly 3 running route suggestions of approximately ${km} km as ${type === 'loop' ? 'loop routes' : 'out-and-back routes'}.
+
+CRITICAL: Respond with ONLY a valid JSON array. No markdown, no backticks, no explanation. Start with [ and end with ].
+
+Use real street names, parks, lakes, or landmarks near (${lat}, ${lon}). Generate realistic GPS waypoints that form a logical running path.${prefContext}
+
+[
+  {
+    "name": "Route name in Danish",
+    "km": ${km},
+    "type": "${type}",
+    "terrain": "asfalt",
+    "difficulty": "let",
+    "highlight": "What makes this route special in Danish (max 10 words)",
+    "waypoints": [
+      {"lat": ${lat}, "lon": ${lon}, "name": "Start"},
+      {"lat": REAL_LAT, "lon": REAL_LON, "name": "Real landmark name"},
+      {"lat": REAL_LAT, "lon": REAL_LON, "name": "Real landmark name"},
+      {"lat": ${lat}, "lon": ${lon}, "name": "Finish"}
+    ]
+  },
+  {
+    "name": "Route name 2",
+    "km": ${km},
+    "type": "${type}",
+    "terrain": "sti",
+    "difficulty": "moderat",
+    "highlight": "Description in Danish",
+    "waypoints": [...]
+  },
+  {
+    "name": "Route name 3",
+    "km": ${km},
+    "type": "${type}",
+    "terrain": "blandet",
+    "difficulty": "hård",
+    "highlight": "Description in Danish",
+    "waypoints": [...]
+  }
+]
+
+User pace: ${recentPace || 'unknown'}. Make waypoints geographically accurate for the area.`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 2000,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    const data = await response.json();
+    let text = data.content?.[0]?.text || '';
+
+    // Strip markdown fences if present
+    text = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+
+    // Extract JSON array
+    const match = text.match(/\[[\s\S]*\]/);
+    if (!match) {
+      return res.status(422).json({ error: 'AI returned unexpected format', raw: text.slice(0, 200) });
+    }
+
+    let routes;
+    try {
+      routes = JSON.parse(match[0]);
+    } catch (parseErr) {
+      // Try to fix common JSON issues (trailing commas)
+      const cleaned = match[0].replace(/,\s*([}\]])/g, '$1');
+      routes = JSON.parse(cleaned);
+    }
+
+    // Ensure waypoints have lat/lon numbers (not strings)
+    routes = routes.map(r => ({
+      ...r,
+      id: Math.random().toString(36).slice(2),
+      waypoints: (r.waypoints || []).map(w => ({
+        ...w,
+        lat: parseFloat(w.lat),
+        lon: parseFloat(w.lon),
+      })),
+      points: (r.waypoints || []).map(w => ({ lat: parseFloat(w.lat), lon: parseFloat(w.lon) })),
+    }));
+
+    res.json({ routes });
+  } catch (e) {
+    console.error('Route suggest error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── SOCIALE FEATURES ────────────────────────────────────────────────────────
+
+// Del et løb — generér et unikt share-id og gem det
+app.post('/runs/share', authMiddleware, async (req, res) => {
+  const { run_id, km, duration_secs, pace_secs_per_km, avg_hr, ai_comment } = req.body;
+  const shareId = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  const profile = await db.query('SELECT data FROM profile WHERE user_id = $1', [req.user.id]);
+  const name = profile.rows[0] ? JSON.parse(profile.rows[0].data || '{}').name || 'Løber' : 'Løber';
+  try {
+    await db.query(
+      'INSERT INTO shared_runs (id, user_id, run_id, name, km, duration_secs, pace_secs_per_km, avg_hr, ai_comment) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (id) DO NOTHING',
+      [shareId, req.user.id, run_id || null, name, km, duration_secs, pace_secs_per_km, avg_hr || null, ai_comment || null]
+    );
+    res.json({ shareId, url: `/shared/${shareId}` });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Hent et delt løb — offentligt, ingen auth
+app.get('/shared/:id', async (req, res) => {
+  const { rows } = await db.query('SELECT * FROM shared_runs WHERE id = $1', [req.params.id]);
+  if (!rows[0]) return res.status(404).json({ error: 'Ikke fundet' });
+  const kudosRes = await db.query('SELECT emoji, COUNT(*) as count FROM kudos WHERE run_share_id = $1 GROUP BY emoji', [req.params.id]);
+  res.json({ run: rows[0], kudos: kudosRes.rows });
+});
+
+// Giv kudos på et delt løb
+app.post('/shared/:id/kudos', authMiddleware, async (req, res) => {
+  const { emoji } = req.body;
+  try {
+    await db.query(
+      'INSERT INTO kudos (run_share_id, from_user_id, emoji) VALUES ($1,$2,$3) ON CONFLICT (run_share_id, from_user_id) DO UPDATE SET emoji = $3',
+      [req.params.id, req.user.id, emoji || '🔥']
+    );
+    const kudosRes = await db.query('SELECT emoji, COUNT(*) as count FROM kudos WHERE run_share_id = $1 GROUP BY emoji', [req.params.id]);
+    res.json({ kudos: kudosRes.rows });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Send venneanmodning
+app.post('/friends/request', authMiddleware, async (req, res) => {
+  const { email } = req.body;
+  const { rows } = await db.query('SELECT id FROM users WHERE email = $1', [email]);
+  if (!rows[0]) return res.status(404).json({ error: 'Bruger ikke fundet' });
+  if (rows[0].id === req.user.id) return res.status(400).json({ error: 'Kan ikke tilføje dig selv' });
+  try {
+    await db.query(
+      'INSERT INTO friends (user_id, friend_id, status) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING',
+      [req.user.id, rows[0].id, 'pending']
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Accepter/afvis venneanmodning
+app.post('/friends/:id/respond', authMiddleware, async (req, res) => {
+  const { accept } = req.body;
+  if (accept) {
+    await db.query('UPDATE friends SET status = $1 WHERE user_id = $2 AND friend_id = $3', ['accepted', req.params.id, req.user.id]);
+    // Tilføj begge veje
+    await db.query('INSERT INTO friends (user_id, friend_id, status) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [req.user.id, req.params.id, 'accepted']);
+  } else {
+    await db.query('DELETE FROM friends WHERE user_id = $1 AND friend_id = $2', [req.params.id, req.user.id]);
+  }
+  res.json({ ok: true });
+});
+
+// Hent venner og pending requests
+app.get('/friends', authMiddleware, async (req, res) => {
+  const friends = await db.query(`
+    SELECT u.id, u.email, p.data as profile_data, f.status
+    FROM friends f
+    JOIN users u ON u.id = f.friend_id
+    LEFT JOIN profile p ON p.user_id = u.id
+    WHERE f.user_id = $1
+    ORDER BY f.status, f.created_at DESC
+  `, [req.user.id]);
+
+  const pending = await db.query(`
+    SELECT u.id, u.email, p.data as profile_data
+    FROM friends f
+    JOIN users u ON u.id = f.user_id
+    LEFT JOIN profile p ON p.user_id = u.id
+    WHERE f.friend_id = $1 AND f.status = 'pending'
+  `, [req.user.id]);
+
+  res.json({ friends: friends.rows, pending: pending.rows });
+});
+
+// Hent venners seneste løb (feed)
+app.get('/friends/feed', authMiddleware, async (req, res) => {
+  const { rows } = await db.query(`
+    SELECT sr.*, 
+           (SELECT COUNT(*) FROM kudos k WHERE k.run_share_id = sr.id) as kudos_count
+    FROM shared_runs sr
+    WHERE sr.user_id IN (
+      SELECT friend_id FROM friends WHERE user_id = $1 AND status = 'accepted'
+    )
+    ORDER BY sr.created_at DESC
+    LIMIT 20
+  `, [req.user.id]);
+  res.json({ feed: rows });
+});
+
 app.get('/', (req, res) => res.json({ status: 'RunWithAI server kører!' }));
+
+// ─── NOMINATIM PROXY ──────────────────────────────────────────────────────────
+app.get('/nominatim', async (req, res) => {
+  try {
+    const q = req.query.q;
+    if (!q || q.length < 3) return res.json([]);
+    // Photon API - gratis, ingen rate-limit, OSM-baseret
+    const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=5&lang=de&bbox=8.0,54.5,15.5,57.8`;
+    const r = await fetch(url, { headers: { 'User-Agent': 'RunWithAI/1.0 (kontakt@runwithai.app)' } });
+    const geojson = await r.json();
+    // Konverter GeoJSON til Nominatim-kompatibelt format
+    const data = (geojson.features || []).map(f => ({
+      display_name: [f.properties.name, f.properties.street, f.properties.city, f.properties.country].filter(Boolean).join(', '),
+      lat: String(f.geometry.coordinates[1]),
+      lon: String(f.geometry.coordinates[0]),
+    }));
+    res.json(data);
+  } catch (e) {
+    res.json([]);
+  }
+});
+
+// ─── RUTE-ROUTER: GraphHopper foot proxy ─────────────────────────────────────
+app.post('/routes/ors', async (req, res) => {
+  try {
+    const { coordinates } = req.body;
+    // Byg GraphHopper URL med waypoints
+    const points = coordinates.map(c => `point=${c[1]},${c[0]}`).join('&');
+    const url = `https://graphhopper.com/api/1/route?${points}&vehicle=foot&locale=da&key=LijBPDQGfu7Iiq80w3HzwB4RUDJbMbhs6BU0dEnn`;
+    const r = await fetch(url);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── OPENAI TTS ──────────────────────────────────────────────────────────────
+app.post('/tts', authMiddleware, async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text) return res.status(400).json({ error: 'Ingen tekst' });
+
+    const response = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'tts-1',
+        input: text.slice(0, 500), // max 500 tegn pr. kald
+        voice: 'nova', // lyder naturlig og venlig
+        response_format: 'mp3',
+        speed: 1.0,
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      return res.status(500).json({ error: err });
+    }
+
+    res.setHeader('Content-Type', 'audio/mpeg');
+    res.setHeader('Cache-Control', 'no-cache');
+    const buffer = await response.arrayBuffer();
+    res.send(Buffer.from(buffer));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 const PORT = process.env.PORT || 3333;
 app.listen(PORT, () => console.log(`RunWithAI server kører på port ${PORT} ✓`));
