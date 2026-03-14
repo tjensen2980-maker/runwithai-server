@@ -73,6 +73,28 @@ if (process.env.DATABASE_URL) {
       created_at TIMESTAMP DEFAULT NOW(),
       UNIQUE(run_share_id, from_user_id)
     );
+    CREATE TABLE IF NOT EXISTS badges (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id),
+      badge_id TEXT NOT NULL,
+      earned_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(user_id, badge_id)
+    );
+    CREATE TABLE IF NOT EXISTS comments (
+      id SERIAL PRIMARY KEY,
+      run_share_id TEXT REFERENCES shared_runs(id),
+      user_id INTEGER REFERENCES users(id),
+      comment TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS integrations (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) UNIQUE,
+      garmin_token TEXT,
+      garmin_refresh_token TEXT,
+      apple_health_enabled BOOLEAN DEFAULT FALSE,
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
   `).then(() => {
   console.log('Database klar ✓');
   // Migrer runs tabel med nye kolonner
@@ -712,6 +734,341 @@ app.post('/tts', authMiddleware, async (req, res) => {
     res.setHeader('Cache-Control', 'no-cache');
     const buffer = await response.arrayBuffer();
     res.send(Buffer.from(buffer));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── BADGES & ACHIEVEMENTS ────────────────────────────────────────────────────
+const BADGE_DEFINITIONS = {
+  first_run: { check: (runs) => runs.length >= 1 },
+  km_10: { check: (runs) => runs.reduce((s, r) => s + (r.km || 0), 0) >= 10 },
+  km_50: { check: (runs) => runs.reduce((s, r) => s + (r.km || 0), 0) >= 50 },
+  km_100: { check: (runs) => runs.reduce((s, r) => s + (r.km || 0), 0) >= 100 },
+  km_500: { check: (runs) => runs.reduce((s, r) => s + (r.km || 0), 0) >= 500 },
+  km_1000: { check: (runs) => runs.reduce((s, r) => s + (r.km || 0), 0) >= 1000 },
+  run_5k: { check: (runs) => runs.some(r => r.km >= 5) },
+  run_10k: { check: (runs) => runs.some(r => r.km >= 10) },
+  run_half: { check: (runs) => runs.some(r => r.km >= 21) },
+  run_marathon: { check: (runs) => runs.some(r => r.km >= 42) },
+  pace_sub6: { check: (runs) => runs.some(r => r.pace_secs_per_km && r.pace_secs_per_km < 360) },
+  pace_sub5: { check: (runs) => runs.some(r => r.pace_secs_per_km && r.pace_secs_per_km < 300) },
+  pace_sub4: { check: (runs) => runs.some(r => r.pace_secs_per_km && r.pace_secs_per_km < 240) },
+};
+
+app.get('/badges', authMiddleware, async (req, res) => {
+  try {
+    const result = await db.query('SELECT badge_id, earned_at FROM badges WHERE user_id = $1', [req.user.id]);
+    const earned = result.rows.map(r => ({ id: r.badge_id, earnedAt: r.earned_at }));
+    res.json({ earned });
+  } catch (e) {
+    res.json({ earned: [] });
+  }
+});
+
+app.post('/badges/check', authMiddleware, async (req, res) => {
+  try {
+    const { runs } = req.body;
+    if (!runs) return res.json({ newBadges: [] });
+    
+    // Hent allerede optjente badges
+    const existing = await db.query('SELECT badge_id FROM badges WHERE user_id = $1', [req.user.id]);
+    const existingIds = new Set(existing.rows.map(r => r.badge_id));
+    
+    const newBadges = [];
+    
+    for (const [badgeId, def] of Object.entries(BADGE_DEFINITIONS)) {
+      if (!existingIds.has(badgeId) && def.check(runs)) {
+        await db.query(
+          'INSERT INTO badges (user_id, badge_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [req.user.id, badgeId]
+        );
+        newBadges.push(badgeId);
+      }
+    }
+    
+    res.json({ newBadges });
+  } catch (e) {
+    res.json({ newBadges: [], error: e.message });
+  }
+});
+
+// ─── STREAK ───────────────────────────────────────────────────────────────────
+app.get('/streak', authMiddleware, async (req, res) => {
+  try {
+    const result = await db.query(
+      'SELECT date FROM runs WHERE user_id = $1 ORDER BY date DESC',
+      [req.user.id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.json({ currentStreak: 0, longestStreak: 0, lastRunDate: null });
+    }
+    
+    // Beregn streak
+    const dates = [...new Set(result.rows.map(r => {
+      const d = new Date(r.date);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }))].sort().reverse();
+    
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-${String(today.getDate()).padStart(2,'0')}`;
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = `${yesterday.getFullYear()}-${String(yesterday.getMonth()+1).padStart(2,'0')}-${String(yesterday.getDate()).padStart(2,'0')}`;
+    
+    let currentStreak = 0;
+    if (dates[0] === todayStr || dates[0] === yesterdayStr) {
+      currentStreak = 1;
+      let checkDate = new Date(dates[0]);
+      for (let i = 1; i < dates.length; i++) {
+        checkDate.setDate(checkDate.getDate() - 1);
+        const checkStr = `${checkDate.getFullYear()}-${String(checkDate.getMonth()+1).padStart(2,'0')}-${String(checkDate.getDate()).padStart(2,'0')}`;
+        if (dates[i] === checkStr) currentStreak++;
+        else break;
+      }
+    }
+    
+    // Find længste streak
+    let longestStreak = currentStreak;
+    let tempStreak = 1;
+    for (let i = 1; i < dates.length; i++) {
+      const prevDate = new Date(dates[i-1]);
+      const currDate = new Date(dates[i]);
+      const diffDays = Math.round((prevDate - currDate) / (1000 * 60 * 60 * 24));
+      if (diffDays === 1) tempStreak++;
+      else {
+        longestStreak = Math.max(longestStreak, tempStreak);
+        tempStreak = 1;
+      }
+    }
+    longestStreak = Math.max(longestStreak, tempStreak);
+    
+    res.json({ 
+      currentStreak, 
+      longestStreak, 
+      lastRunDate: dates[0],
+      ranToday: dates[0] === todayStr
+    });
+  } catch (e) {
+    res.json({ currentStreak: 0, longestStreak: 0, error: e.message });
+  }
+});
+
+// ─── COMMENTS ─────────────────────────────────────────────────────────────────
+app.post('/shared/:id/comment', authMiddleware, async (req, res) => {
+  try {
+    const { comment } = req.body;
+    if (!comment || comment.trim().length === 0) {
+      return res.status(400).json({ error: 'Kommentar påkrævet' });
+    }
+    
+    await db.query(
+      'INSERT INTO comments (run_share_id, user_id, comment) VALUES ($1, $2, $3)',
+      [req.params.id, req.user.id, comment.trim()]
+    );
+    
+    // Hent alle kommentarer
+    const result = await db.query(`
+      SELECT c.*, u.email, p.data as profile_data
+      FROM comments c
+      JOIN users u ON u.id = c.user_id
+      LEFT JOIN profile p ON p.user_id = u.id
+      WHERE c.run_share_id = $1
+      ORDER BY c.created_at ASC
+    `, [req.params.id]);
+    
+    const comments = result.rows.map(r => ({
+      id: r.id,
+      comment: r.comment,
+      createdAt: r.created_at,
+      user: {
+        email: r.email,
+        name: r.profile_data ? JSON.parse(r.profile_data).name : r.email.split('@')[0],
+      }
+    }));
+    
+    res.json({ comments });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/shared/:id/comments', async (req, res) => {
+  try {
+    const result = await db.query(`
+      SELECT c.*, u.email, p.data as profile_data
+      FROM comments c
+      JOIN users u ON u.id = c.user_id
+      LEFT JOIN profile p ON p.user_id = u.id
+      WHERE c.run_share_id = $1
+      ORDER BY c.created_at ASC
+    `, [req.params.id]);
+    
+    const comments = result.rows.map(r => ({
+      id: r.id,
+      comment: r.comment,
+      createdAt: r.created_at,
+      user: {
+        email: r.email,
+        name: r.profile_data ? JSON.parse(r.profile_data).name : r.email.split('@')[0],
+      }
+    }));
+    
+    res.json({ comments });
+  } catch (e) {
+    res.json({ comments: [] });
+  }
+});
+
+// ─── ENHANCED SOCIAL FEED ─────────────────────────────────────────────────────
+app.get('/feed', authMiddleware, async (req, res) => {
+  try {
+    const { rows } = await db.query(`
+      SELECT 
+        sr.*,
+        (SELECT COUNT(*) FROM kudos k WHERE k.run_share_id = sr.id) as kudos_count,
+        (SELECT COUNT(*) FROM comments c WHERE c.run_share_id = sr.id) as comment_count,
+        (SELECT emoji FROM kudos WHERE run_share_id = sr.id AND from_user_id = $1) as my_kudos
+      FROM shared_runs sr
+      WHERE sr.user_id IN (
+        SELECT friend_id FROM friends WHERE user_id = $1 AND status = 'accepted'
+      ) OR sr.user_id = $1
+      ORDER BY sr.created_at DESC
+      LIMIT 50
+    `, [req.user.id]);
+    
+    // Tilføj kommentarer til hver post
+    for (const row of rows) {
+      const comments = await db.query(`
+        SELECT c.comment, c.created_at, u.email, p.data as profile_data
+        FROM comments c
+        JOIN users u ON u.id = c.user_id
+        LEFT JOIN profile p ON p.user_id = u.id
+        WHERE c.run_share_id = $1
+        ORDER BY c.created_at DESC
+        LIMIT 3
+      `, [row.id]);
+      
+      row.recentComments = comments.rows.map(c => ({
+        comment: c.comment,
+        createdAt: c.created_at,
+        userName: c.profile_data ? JSON.parse(c.profile_data).name : c.email.split('@')[0],
+      }));
+    }
+    
+    res.json({ feed: rows });
+  } catch (e) {
+    res.json({ feed: [], error: e.message });
+  }
+});
+
+// ─── GARMIN CONNECT INTEGRATION ───────────────────────────────────────────────
+// Note: Garmin Connect API kræver partner-aftale med Garmin
+// Dette er placeholder endpoints - kræver rigtige API credentials
+
+app.get('/integrations/status', authMiddleware, async (req, res) => {
+  try {
+    const result = await db.query(
+      'SELECT garmin_token, apple_health_enabled FROM integrations WHERE user_id = $1',
+      [req.user.id]
+    );
+    
+    res.json({
+      garmin: !!result.rows[0]?.garmin_token,
+      appleHealth: !!result.rows[0]?.apple_health_enabled,
+    });
+  } catch (e) {
+    res.json({ garmin: false, appleHealth: false });
+  }
+});
+
+app.post('/integrations/garmin/connect', authMiddleware, async (req, res) => {
+  try {
+    const { authCode } = req.body;
+    
+    // TODO: Exchange auth code for access token via Garmin OAuth
+    // Dette kræver Garmin Developer Partner aftale
+    // Se: https://developer.garmin.com/connect-iq/api-docs/
+    
+    // Placeholder response
+    res.json({ 
+      success: false, 
+      message: 'Garmin integration kræver partner-aftale. Kontakt support.' 
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/integrations/garmin/disconnect', authMiddleware, async (req, res) => {
+  try {
+    await db.query(
+      'UPDATE integrations SET garmin_token = NULL, garmin_refresh_token = NULL WHERE user_id = $1',
+      [req.user.id]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/integrations/garmin/sync', authMiddleware, async (req, res) => {
+  try {
+    // Check for existing Garmin connection
+    const result = await db.query(
+      'SELECT garmin_token FROM integrations WHERE user_id = $1',
+      [req.user.id]
+    );
+    
+    if (!result.rows[0]?.garmin_token) {
+      return res.status(400).json({ error: 'Garmin ikke forbundet' });
+    }
+    
+    // TODO: Fetch activities from Garmin Connect API
+    // Kræver valid access token
+    
+    res.json({ activities: [], message: 'Sync ikke implementeret endnu' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── APPLE HEALTH IMPORT ──────────────────────────────────────────────────────
+app.post('/integrations/apple-health/import', authMiddleware, async (req, res) => {
+  try {
+    const { workouts } = req.body;
+    if (!workouts || !Array.isArray(workouts)) {
+      return res.status(400).json({ error: 'Ingen workouts data' });
+    }
+    
+    let imported = 0;
+    for (const workout of workouts) {
+      // Konverter Apple Health format til RunWithAI format
+      const run = {
+        km: workout.totalDistance / 1000, // meters to km
+        duration_secs: workout.duration,
+        pace_secs_per_km: workout.duration / (workout.totalDistance / 1000),
+        avg_hr: workout.averageHeartRate || null,
+        date: workout.startDate,
+        notes: JSON.stringify({ source: 'apple_health', originalId: workout.uuid }),
+      };
+      
+      await db.query(
+        'INSERT INTO runs (user_id, km, duration_secs, pace_secs_per_km, avg_hr, date, notes) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+        [req.user.id, run.km, run.duration_secs, run.pace_secs_per_km, run.avg_hr, run.date, run.notes]
+      );
+      imported++;
+    }
+    
+    // Opdater integration status
+    await db.query(
+      `INSERT INTO integrations (user_id, apple_health_enabled) VALUES ($1, TRUE)
+       ON CONFLICT (user_id) DO UPDATE SET apple_health_enabled = TRUE, updated_at = NOW()`,
+      [req.user.id]
+    );
+    
+    res.json({ imported, message: `${imported} løb importeret fra Apple Health` });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
