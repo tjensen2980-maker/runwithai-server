@@ -398,7 +398,53 @@ app.post('/create-portal-session', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── AUTH ENDPOINTS ─────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// AUTH ENDPOINTS - NYE ENDPOINTS TIL AUTH.JS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Register - UDEN /auth/ prefix
+app.post('/register', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email og adgangskode kræves' });
+  if (password.length < 6) return res.status(400).json({ error: 'Adgangskode skal være mindst 6 tegn' });
+  try {
+    const hashed = await bcrypt.hash(password, 10);
+    const result = await db.query(
+      'INSERT INTO users (email, password, subscription_tier, subscription_status) VALUES ($1, $2, $3, $4) RETURNING id, email',
+      [email.toLowerCase().trim(), hashed, 'free', 'none']
+    );
+    const user = result.rows[0];
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' });
+    res.json({ token, user: { id: user.id, email: user.email } });
+  } catch (e) {
+    if (e.message?.includes('UNIQUE') || e.code === '23505') {
+      res.status(400).json({ error: 'Email er allerede i brug' });
+    } else {
+      console.error('Register fejl:', e);
+      res.status(500).json({ error: 'Serverfejl' });
+    }
+  }
+});
+
+// Login - UDEN /auth/ prefix
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email og adgangskode kræves' });
+  try {
+    const result = await db.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase().trim()]);
+    const user = result.rows[0];
+    if (!user) return res.status(401).json({ error: 'Forkert email eller adgangskode' });
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ error: 'Forkert email eller adgangskode' });
+    const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '30d' });
+    res.json({ token, user: { id: user.id, email: user.email } });
+  } catch (e) {
+    console.error('Login fejl:', e);
+    res.status(500).json({ error: 'Serverfejl' });
+  }
+});
+
+// Behold også de gamle endpoints for bagudkompatibilitet
 app.post('/auth/register', async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email og adgangskode kræves' });
@@ -451,6 +497,21 @@ app.get('/profile', authMiddleware, async (req, res) => {
 });
 
 app.post('/profile', authMiddleware, async (req, res) => {
+  try {
+    await db.query(
+      `INSERT INTO profile (id, user_id, data, updated_at) VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (id) DO UPDATE SET data = $3, user_id = $2, updated_at = NOW()`,
+      [req.user.id, req.user.id, JSON.stringify(req.body)]
+    );
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'Fejl' });
+  }
+});
+
+// Også PUT /profile for Auth.js
+app.put('/profile', authMiddleware, async (req, res) => {
   try {
     await db.query(
       `INSERT INTO profile (id, user_id, data, updated_at) VALUES ($1, $2, $3, NOW())
@@ -899,7 +960,10 @@ app.get('/friends/feed', authMiddleware, async (req, res) => {
   res.json({ feed: rows });
 });
 
-app.get('/', (req, res) => res.json({ status: 'RunWithAI server kører!', version: '2.0.0-stripe' }));
+// ═══════════════════════════════════════════════════════════════════════════════
+// ROOT ENDPOINT - OPDATERET TIL v2.1.0
+// ═══════════════════════════════════════════════════════════════════════════════
+app.get('/', (req, res) => res.json({ status: 'RunWithAI server kører!', version: '2.1.0-stripe' }));
 
 // ─── NOMINATIM PROXY ────────────────────────────────────────────────────────────
 app.get('/nominatim', async (req, res) => {
@@ -1230,4 +1294,4 @@ app.post('/integrations/apple-health/import', authMiddleware, async (req, res) =
 });
 
 const PORT = process.env.PORT || 3333;
-app.listen(PORT, () => console.log(`RunWithAI server kører på port ${PORT} ✓`));
+app.listen(PORT, () => console.log(`🏃 RunWithAI server v2.1.0-stripe kører på port ${PORT} ✓`));
