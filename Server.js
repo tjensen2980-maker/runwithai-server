@@ -143,8 +143,8 @@ if (process.env.DATABASE_URL) {
       created_at TIMESTAMP DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS profile (
-      id INTEGER PRIMARY KEY DEFAULT 1,
-      user_id INTEGER REFERENCES users(id),
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER UNIQUE REFERENCES users(id),
       data TEXT,
       updated_at TIMESTAMP DEFAULT NOW()
     );
@@ -156,8 +156,8 @@ if (process.env.DATABASE_URL) {
       created_at TIMESTAMP DEFAULT NOW()
     );
     CREATE TABLE IF NOT EXISTS week_plan (
-      id INTEGER PRIMARY KEY DEFAULT 1,
-      user_id INTEGER REFERENCES users(id),
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER UNIQUE REFERENCES users(id),
       data TEXT,
       updated_at TIMESTAMP DEFAULT NOW()
     );
@@ -499,9 +499,9 @@ app.get('/profile', authMiddleware, async (req, res) => {
 app.post('/profile', authMiddleware, async (req, res) => {
   try {
     await db.query(
-      `INSERT INTO profile (id, user_id, data, updated_at) VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (id) DO UPDATE SET data = $3, user_id = $2, updated_at = NOW()`,
-      [req.user.id, req.user.id, JSON.stringify(req.body)]
+      `INSERT INTO profile (user_id, data, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET data = $2, updated_at = NOW()`,
+      [req.user.id, JSON.stringify(req.body)]
     );
     res.json({ ok: true });
   } catch (e) {
@@ -514,9 +514,9 @@ app.post('/profile', authMiddleware, async (req, res) => {
 app.put('/profile', authMiddleware, async (req, res) => {
   try {
     await db.query(
-      `INSERT INTO profile (id, user_id, data, updated_at) VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (id) DO UPDATE SET data = $3, user_id = $2, updated_at = NOW()`,
-      [req.user.id, req.user.id, JSON.stringify(req.body)]
+      `INSERT INTO profile (user_id, data, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET data = $2, updated_at = NOW()`,
+      [req.user.id, JSON.stringify(req.body)]
     );
     res.json({ ok: true });
   } catch (e) {
@@ -563,9 +563,9 @@ app.get('/weekplan', authMiddleware, async (req, res) => {
 app.post('/weekplan', authMiddleware, async (req, res) => {
   try {
     await db.query(
-      `INSERT INTO week_plan (id, user_id, data, updated_at) VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (id) DO UPDATE SET data = $3, user_id = $2, updated_at = NOW()`,
-      [req.user.id, req.user.id, JSON.stringify(req.body)]
+      `INSERT INTO week_plan (user_id, data, updated_at) VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id) DO UPDATE SET data = $2, updated_at = NOW()`,
+      [req.user.id, JSON.stringify(req.body)]
     );
     res.json({ ok: true });
   } catch (e) {
