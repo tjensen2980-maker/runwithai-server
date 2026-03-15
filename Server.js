@@ -218,6 +218,26 @@ if (process.env.DATABASE_URL) {
     db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS route TEXT').catch(() => {});
     db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS notes TEXT').catch(() => {});
     db.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS date TIMESTAMP DEFAULT NOW()').catch(() => {});
+    
+    // Migration: Tilføj UNIQUE constraint til profile.user_id hvis den ikke findes
+    db.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'profile_user_id_key') THEN
+          ALTER TABLE profile ADD CONSTRAINT profile_user_id_key UNIQUE (user_id);
+        END IF;
+      END $$;
+    `).then(() => console.log('Profile UNIQUE constraint klar ✓')).catch(e => console.log('Profile constraint:', e.message));
+    
+    // Migration: Tilføj UNIQUE constraint til week_plan.user_id hvis den ikke findes
+    db.query(`
+      DO $$ 
+      BEGIN 
+        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'week_plan_user_id_key') THEN
+          ALTER TABLE week_plan ADD CONSTRAINT week_plan_user_id_key UNIQUE (user_id);
+        END IF;
+      END $$;
+    `).then(() => console.log('Week_plan UNIQUE constraint klar ✓')).catch(e => console.log('Week_plan constraint:', e.message));
   }).catch(e => console.error('DB setup fejl:', e));
 } else {
   const Database = require('better-sqlite3');
@@ -963,7 +983,7 @@ app.get('/friends/feed', authMiddleware, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // ROOT ENDPOINT - OPDATERET TIL v2.1.0
 // ═══════════════════════════════════════════════════════════════════════════════
-app.get('/', (req, res) => res.json({ status: 'RunWithAI server kører!', version: '2.1.0-stripe' }));
+app.get('/', (req, res) => res.json({ status: 'RunWithAI server kører!', version: '2.2.0-stripe' }));
 
 // ─── NOMINATIM PROXY ────────────────────────────────────────────────────────────
 app.get('/nominatim', async (req, res) => {
