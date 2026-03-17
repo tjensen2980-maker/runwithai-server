@@ -309,6 +309,18 @@ app.post('/create-checkout-session', authMiddleware, async (req, res) => {
     const userResult = await pool.query('SELECT email, stripe_customer_id FROM users WHERE id = $1', [req.userId]);
     const user = userResult.rows[0];
     let customerId = user.stripe_customer_id;
+    
+    // Validate existing customer or create new one
+    if (customerId) {
+      try {
+        await stripe.customers.retrieve(customerId);
+      } catch (stripeErr) {
+        // Customer doesn't exist (e.g., was created in test mode) - create new one
+        console.log('Customer not found in Stripe, creating new:', customerId);
+        customerId = null;
+      }
+    }
+    
     if (!customerId) {
       const customer = await stripe.customers.create({
         email: user.email,
@@ -316,10 +328,14 @@ app.post('/create-checkout-session', authMiddleware, async (req, res) => {
       });
       customerId = customer.id;
       await pool.query('UPDATE users SET stripe_customer_id = $1 WHERE id = $2', [customerId, req.userId]);
+      console.log('Created new Stripe customer:', customerId);
     }
+    
     const priceId = interval === 'yearly' 
       ? process.env.STRIPE_PRICE_PRO_YEARLY 
       : process.env.STRIPE_PRICE_PRO_MONTHLY;
+    console.log('Creating checkout session with price:', priceId, 'for customer:', customerId);
+    
     const session = await stripe.checkout.sessions.create({
       customer: customerId,
       payment_method_types: ['card'],
