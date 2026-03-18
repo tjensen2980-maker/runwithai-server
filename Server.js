@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// SERVER.JS - RunWithAI Backend v2.2.0-stripe
+// SERVER.JS - RunWithAI Backend v2.3.0-stripe
 // Med delete-account endpoint (Apple App Store krav)
+// Med delete run endpoint
 // ═══════════════════════════════════════════════════════════════════════════════
 const express = require('express');
 const cors = require('cors');
@@ -10,16 +11,13 @@ const { Pool } = require('pg');
 const Stripe = require('stripe');
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 // ─── DATABASE ───────────────────────────────────────────────────────────────
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
-
 // ─── STRIPE ─────────────────────────────────────────────────────────────────
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-
 // ─── SUBSCRIPTION TIERS ─────────────────────────────────────────────────────
 const TIERS = {
   free: {
@@ -31,7 +29,6 @@ const TIERS = {
     features: ['basic_tracking', 'weekly_stats', 'ai_coach', 'badges', 'streaks', 'pulse_zones', 'garmin_sync', 'social_feed', 'export_data', 'unlimited_runs']
   }
 };
-
 // ─── MIDDLEWARE ─────────────────────────────────────────────────────────────
 // Stripe webhook MUST be before express.json()
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -43,7 +40,6 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
     console.error('Webhook signature verification failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-
   switch (event.type) {
     case 'checkout.session.completed': {
       const session = event.data.object;
@@ -88,14 +84,11 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
   }
   res.json({ received: true });
 });
-
 // JSON parsing for other routes
 app.use(express.json());
 app.use(cors());
-
 // ─── JWT SECRET ─────────────────────────────────────────────────────────────
 const JWT_SECRET = process.env.JWT_SECRET || 'runwithai-secret-key-2024';
-
 // ─── AUTH MIDDLEWARE ────────────────────────────────────────────────────────
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -111,11 +104,9 @@ const authMiddleware = async (req, res, next) => {
     return res.status(401).json({ error: 'Ugyldig token' });
   }
 };
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // AUTH ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
-
 app.post('/register', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -141,7 +132,6 @@ app.post('/register', async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke oprette bruger' });
   }
 });
-
 app.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -171,11 +161,9 @@ app.post('/login', async (req, res) => {
     res.status(500).json({ error: 'Login fejlede' });
   }
 });
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // PROFILE ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
-
 app.get('/profile', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -191,7 +179,6 @@ app.get('/profile', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente profil' });
   }
 });
-
 app.put('/profile', authMiddleware, async (req, res) => {
   try {
     const profileData = req.body;
@@ -207,11 +194,9 @@ app.put('/profile', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke gemme profil' });
   }
 });
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // DELETE ACCOUNT ENDPOINT (Apple App Store krav)
 // ═══════════════════════════════════════════════════════════════════════════════
-
 app.delete('/delete-account', authMiddleware, async (req, res) => {
   const userId = req.userId;
   console.log(`Delete account request for userId: ${userId}`);
@@ -263,11 +248,9 @@ app.delete('/delete-account', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke slette konto. Prøv igen senere.' });
   }
 });
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // SUBSCRIPTION ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
-
 app.get('/subscription', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -302,7 +285,6 @@ app.get('/subscription', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente abonnement' });
   }
 });
-
 app.post('/create-checkout-session', authMiddleware, async (req, res) => {
   try {
     const { interval } = req.body;
@@ -350,7 +332,6 @@ app.post('/create-checkout-session', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke starte checkout' });
   }
 });
-
 app.post('/create-portal-session', authMiddleware, async (req, res) => {
   try {
     const userResult = await pool.query('SELECT stripe_customer_id FROM users WHERE id = $1', [req.userId]);
@@ -368,11 +349,9 @@ app.post('/create-portal-session', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke åbne kundeportal' });
   }
 });
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // RUNS ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
-
 app.get('/runs', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -385,7 +364,6 @@ app.get('/runs', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente løb' });
   }
 });
-
 app.post('/runs', authMiddleware, async (req, res) => {
   try {
     const run = req.body;
@@ -412,10 +390,27 @@ app.post('/runs', authMiddleware, async (req, res) => {
   }
 });
 
+// DELETE a single run (only own runs)
+app.delete('/runs/:id', authMiddleware, async (req, res) => {
+  try {
+    const runId = req.params.id;
+    const result = await pool.query(
+      'DELETE FROM runs WHERE id = $1 AND user_id = $2 RETURNING id',
+      [runId, req.userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Løb ikke fundet' });
+    }
+    res.json({ success: true, deletedId: result.rows[0].id });
+  } catch (err) {
+    console.error('Delete run error:', err);
+    res.status(500).json({ error: 'Kunne ikke slette løb' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // TRAINING PLAN ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
-
 app.get('/trainingplan', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -428,7 +423,6 @@ app.get('/trainingplan', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente træningsplan' });
   }
 });
-
 app.post('/trainingplan/save', authMiddleware, async (req, res) => {
   try {
     const { data } = req.body;
@@ -444,11 +438,9 @@ app.post('/trainingplan/save', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke gemme træningsplan' });
   }
 });
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // WEEK PLAN ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
-
 app.get('/weekplan', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -461,7 +453,6 @@ app.get('/weekplan', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente ugeplan' });
   }
 });
-
 app.post('/weekplan', authMiddleware, async (req, res) => {
   try {
     const data = req.body;
@@ -477,18 +468,16 @@ app.post('/weekplan', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke gemme ugeplan' });
   }
 });
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // ROOT ENDPOINT
 // ═══════════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({ status: 'RunWithAI server kører!', version: '2.2.0-stripe' });
+  res.json({ status: 'RunWithAI server kører!', version: '2.3.0-stripe' });
 });
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`🏃 RunWithAI server kører på port ${PORT}`);
-  console.log(`📦 Version: 2.2.0-stripe`);
+  console.log(`📦 Version: 2.3.0-stripe`);
 });
