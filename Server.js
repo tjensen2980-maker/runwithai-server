@@ -469,15 +469,98 @@ app.post('/weekplan', authMiddleware, async (req, res) => {
   }
 });
 // ═══════════════════════════════════════════════════════════════════════════════
+// AI CHAT ENDPOINT (proxy to Anthropic API)
+// ═══════════════════════════════════════════════════════════════════════════════
+app.post('/chat', authMiddleware, async (req, res) => {
+  try {
+    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(500).json({ error: 'AI coach ikke konfigureret (mangler API nøgle)' });
+    }
+    const { model, max_tokens, system, messages } = req.body;
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: model || 'claude-sonnet-4-20250514',
+        max_tokens: max_tokens || 2000,
+        system: system || '',
+        messages: messages || [],
+      }),
+    });
+    const data = await anthropicRes.json();
+    if (!anthropicRes.ok) {
+      console.error('Anthropic API error:', data);
+      return res.status(anthropicRes.status).json(data);
+    }
+    res.json(data);
+  } catch (err) {
+    console.error('Chat error:', err);
+    res.status(500).json({ error: 'AI coach fejl' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MESSAGES ENDPOINTS (chat history)
+// ═══════════════════════════════════════════════════════════════════════════════
+app.get('/messages', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT data FROM messages WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 1',
+      [req.userId]
+    );
+    if (result.rows.length === 0) return res.json([]);
+    const data = result.rows[0].data;
+    if (typeof data === 'string') {
+      try { return res.json(JSON.parse(data)); } catch {}
+    }
+    res.json(data || []);
+  } catch (err) {
+    console.error('Get messages error:', err);
+    res.json([]);
+  }
+});
+
+app.post('/messages', authMiddleware, async (req, res) => {
+  try {
+    const { messages } = req.body;
+    await pool.query(`
+      INSERT INTO messages (user_id, data, updated_at)
+      VALUES ($1, $2, NOW())
+      ON CONFLICT (user_id)
+      DO UPDATE SET data = $2, updated_at = NOW()
+    `, [req.userId, JSON.stringify(messages)]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Save messages error:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme beskeder' });
+  }
+});
+
+app.delete('/messages', authMiddleware, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM messages WHERE user_id = $1', [req.userId]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Delete messages error:', err);
+    res.status(500).json({ error: 'Kunne ikke slette beskeder' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ROOT ENDPOINT
 // ═══════════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({ status: 'RunWithAI server kører!', version: '2.3.0-stripe' });
+  res.json({ status: 'RunWithAI server kører!', version: '2.4.0-stripe' });
 });
 // ═══════════════════════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`🏃 RunWithAI server kører på port ${PORT}`);
-  console.log(`📦 Version: 2.3.0-stripe`);
+  console.log(`📦 Version: 2.4.0-stripe`);
 });
