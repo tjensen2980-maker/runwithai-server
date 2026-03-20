@@ -469,6 +469,52 @@ app.post('/weekplan', authMiddleware, async (req, res) => {
   }
 });
 // ═══════════════════════════════════════════════════════════════════════════════
+// TTS ENDPOINT (OpenAI Text-to-Speech — nova voice)
+// ═══════════════════════════════════════════════════════════════════════════════
+app.post('/tts', authMiddleware, async (req, res) => {
+  try {
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) {
+      return res.status(500).json({ error: 'TTS ikke konfigureret (mangler OpenAI API nøgle)' });
+    }
+    const { text, voice } = req.body;
+    if (!text) return res.status(400).json({ error: 'Mangler text' });
+
+    const openaiRes = await fetch('https://api.openai.com/v1/audio/speech', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'tts-1',
+        input: text,
+        voice: voice || 'nova',
+        response_format: 'mp3',
+        speed: 1.0,
+      }),
+    });
+
+    if (!openaiRes.ok) {
+      const err = await openaiRes.text();
+      console.error('OpenAI TTS error:', err);
+      return res.status(openaiRes.status).json({ error: 'TTS fejl' });
+    }
+
+    // Stream MP3 direkte til klienten
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Cache-Control': 'no-cache',
+    });
+    const buffer = Buffer.from(await openaiRes.arrayBuffer());
+    res.send(buffer);
+  } catch (err) {
+    console.error('TTS error:', err);
+    res.status(500).json({ error: 'TTS fejl' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // AI CHAT ENDPOINT (proxy to Anthropic API)
 // ═══════════════════════════════════════════════════════════════════════════════
 app.post('/chat', authMiddleware, async (req, res) => {
