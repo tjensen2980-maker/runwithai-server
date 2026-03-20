@@ -1,8 +1,9 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// SERVER.JS - RunWithAI Backend v2.5.0-challenges
+// SERVER.JS - RunWithAI Backend v2.6.0-photo-story
 // Med delete-account endpoint (Apple App Store krav)
 // Med delete run endpoint
 // Med social challenges & streaks
+// Med AI photo story
 // ═══════════════════════════════════════════════════════════════════════════════
 const express = require('express');
 const cors = require('cors');
@@ -86,7 +87,7 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
   res.json({ received: true });
 });
 // JSON parsing for other routes
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 app.use(cors());
 // ─── JWT SECRET ─────────────────────────────────────────────────────────────
 const JWT_SECRET = process.env.JWT_SECRET || 'runwithai-secret-key-2024';
@@ -237,6 +238,10 @@ app.delete('/delete-account', authMiddleware, async (req, res) => {
     try { await pool.query('DELETE FROM streak_log WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM challenge_participants WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query("DELETE FROM challenges WHERE creator_id = $1 AND id NOT IN (SELECT challenge_id FROM challenge_participants)", [userId]); } catch (e) {}
+    
+    // Clean up photo story data
+    try { await pool.query('DELETE FROM run_photos WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM run_stories WHERE user_id = $1', [userId]); } catch (e) {}
     
     try { await pool.query('DELETE FROM runs WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM training_plan WHERE user_id = $1', [userId]); } catch (e) {}
@@ -678,6 +683,216 @@ app.delete('/challenges/:id/leave', authMiddleware, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// PHOTO STORY ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── UPLOAD PHOTO DURING RUN ────────────────────────────────────────────────
+app.post('/runs/:runId/photos', authMiddleware, async (req, res) => {
+  try {
+    const { runId } = req.params;
+    const { image_base64, latitude, longitude, timestamp, caption } = req.body;
+
+    if (!image_base64) return res.status(400).json({ error: 'image_base64 required' });
+
+    // Verify run belongs to user
+    const run = await pool.query('SELECT id FROM runs WHERE id = $1 AND user_id = $2', [runId, req.userId]);
+    if (run.rows.length === 0) return res.status(404).json({ error: 'Run not found' });
+
+    const result = await pool.query(
+      `INSERT INTO run_photos (run_id, user_id, image_base64, latitude, longitude, taken_at, caption)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, latitude, longitude, taken_at, caption`,
+      [runId, req.userId, image_base64, latitude || null, longitude || null, timestamp || new Date(), caption || null]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Upload photo error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── GET PHOTOS FOR A RUN ───────────────────────────────────────────────────
+app.get('/runs/:runId/photos', authMiddleware, async (req, res) => {
+  try {
+    const { runId } = req.params;
+    const result = await pool.query(
+      `SELECT id, image_base64, latitude, longitude, taken_at, caption
+       FROM run_photos WHERE run_id = $1 AND user_id = $2
+       ORDER BY taken_at ASC`,
+      [runId, req.userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get photos error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── GENERATE AI STORY FROM RUN + PHOTOS ────────────────────────────────────
+app.post('/runs/:runId/story', authMiddleware, async (req, res) => {
+  try {
+    const { runId } = req.params;
+
+    // Get run data
+    const run = await pool.query(
+      'SELECT * FROM runs WHERE id = $1 AND user_id = $2',
+      [runId, req.userId]
+    );
+    if (run.rows.length === 0) return res.status(404).json({ error: 'Run not found' });
+
+    // Get photos
+    const photos = await pool.query(
+      `SELECT id, latitude, longitude, taken_at, caption FROM run_photos
+       WHERE run_id = $1 AND user_id = $2 ORDER BY taken_at ASC`,
+      [runId, req.userId]
+    );
+
+    // Get user profile for name
+    const profile = await pool.query('SELECT data FROM profile WHERE user_id = $1', [req.userId]);
+    const profileData = profile.rows[0]?.data;
+    const userName = (typeof profileData === 'string' ? JSON.parse(profileData) : profileData)?.name || 'Løber';
+
+    const runData = run.rows[0];
+    const km = parseFloat(runData.km || 0).toFixed(1);
+    const duration = runData.duration || 'ukendt';
+    const photoCount = photos.rows.length;
+
+    // Build prompt for AI story
+    const photoDescriptions = photos.rows.map((p, i) => {
+      const time = new Date(p.taken_at).toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit' });
+      return `Foto ${i + 1}: taget kl. ${time}${p.caption ? ` — "${p.caption}"` : ''}${p.latitude ? ` (${parseFloat(p.latitude).toFixed(4)}, ${parseFloat(p.longitude).toFixed(4)})` : ''}`;
+    }).join('\n');
+
+    const prompt = `Du er en kreativ løbe-historiefortæller for appen RunWithAI. Skriv en kort, engagerende løbe-story på dansk (max 200 ord) baseret på dette løb:
+
+Løber: ${userName}
+Distance: ${km} km
+Varighed: ${duration}
+Antal fotos: ${photoCount}
+${photoDescriptions ? `\nFotos undervejs:\n${photoDescriptions}` : ''}
+
+Skriv en livlig, motiverende fortælling i 2. person ("du") der beskriver løbeturen som en eventyrlig rejse. Brug foto-tidspunkterne og eventuelle captions til at flette billederne naturligt ind i historien. Tilføj emoji hvor det passer. Afslut med en opmuntrende kommentar.
+
+Svar KUN med selve historieteksten, ingen overskrift.`;
+
+    // Call OpenAI
+    const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 400,
+        temperature: 0.8,
+      }),
+    });
+
+    const aiData = await openaiRes.json();
+    const storyText = aiData.choices?.[0]?.message?.content || 'Kunne ikke generere story.';
+
+    // Save story (upsert)
+    const existing = await pool.query(
+      'SELECT id FROM run_stories WHERE run_id = $1', [runId]
+    );
+
+    let storyResult;
+    if (existing.rows.length > 0) {
+      storyResult = await pool.query(
+        `UPDATE run_stories SET story_text = $1, updated_at = NOW() WHERE run_id = $2 RETURNING *`,
+        [storyText, runId]
+      );
+    } else {
+      storyResult = await pool.query(
+        `INSERT INTO run_stories (run_id, user_id, story_text) VALUES ($1, $2, $3) RETURNING *`,
+        [runId, req.userId, storyText]
+      );
+    }
+
+    res.json({
+      story: storyResult.rows[0],
+      photos: photos.rows,
+      run: { km, duration, date: runData.date || runData.created_at },
+    });
+  } catch (err) {
+    console.error('Generate story error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── GET EXISTING STORY ─────────────────────────────────────────────────────
+app.get('/runs/:runId/story', authMiddleware, async (req, res) => {
+  try {
+    const { runId } = req.params;
+    const story = await pool.query(
+      'SELECT * FROM run_stories WHERE run_id = $1 AND user_id = $2',
+      [runId, req.userId]
+    );
+    if (story.rows.length === 0) return res.status(404).json({ error: 'No story yet' });
+
+    const photos = await pool.query(
+      `SELECT id, image_base64, latitude, longitude, taken_at, caption
+       FROM run_photos WHERE run_id = $1 AND user_id = $2 ORDER BY taken_at ASC`,
+      [runId, req.userId]
+    );
+
+    res.json({ story: story.rows[0], photos: photos.rows });
+  } catch (err) {
+    console.error('Get story error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── SHARE STORY TO FEED ────────────────────────────────────────────────────
+app.post('/runs/:runId/story/share', authMiddleware, async (req, res) => {
+  try {
+    const { runId } = req.params;
+
+    const story = await pool.query(
+      'SELECT * FROM run_stories WHERE run_id = $1 AND user_id = $2',
+      [runId, req.userId]
+    );
+    if (story.rows.length === 0) return res.status(404).json({ error: 'Generate story first' });
+
+    await pool.query(
+      'UPDATE run_stories SET shared = true, shared_at = NOW() WHERE run_id = $1',
+      [runId]
+    );
+
+    res.json({ success: true, message: 'Story delt!' });
+  } catch (err) {
+    console.error('Share story error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ─── GET SHARED STORIES FROM FRIENDS ────────────────────────────────────────
+app.get('/feed/stories', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT rs.*, r.km, r.duration, r.date, p.data->>'name' as name,
+        (SELECT COUNT(*) FROM run_photos rp WHERE rp.run_id = rs.run_id) as photo_count
+       FROM run_stories rs
+       JOIN runs r ON r.id = rs.run_id
+       LEFT JOIN profile p ON p.user_id = rs.user_id
+       WHERE rs.shared = true
+         AND (rs.user_id = $1 OR rs.user_id IN (
+           SELECT CASE WHEN user_id = $1 THEN friend_id ELSE user_id END
+           FROM friends WHERE (user_id = $1 OR friend_id = $1) AND status = 'accepted'
+         ))
+       ORDER BY rs.shared_at DESC LIMIT 20`,
+      [req.userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get feed stories error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // TRAINING PLAN ENDPOINTS
 // ═══════════════════════════════════════════════════════════════════════════════
 app.get('/trainingplan', authMiddleware, async (req, res) => {
@@ -870,12 +1085,12 @@ app.delete('/messages', authMiddleware, async (req, res) => {
 // ROOT ENDPOINT
 // ═══════════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({ status: 'RunWithAI server kører!', version: '2.5.0-challenges' });
+  res.json({ status: 'RunWithAI server kører!', version: '2.6.0-photo-story' });
 });
 // ═══════════════════════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`🏃 RunWithAI server kører på port ${PORT}`);
-  console.log(`📦 Version: 2.5.0-challenges`);
+  console.log(`📦 Version: 2.6.0-photo-story`);
 });
