@@ -489,7 +489,7 @@ app.post('/tts', authMiddleware, async (req, res) => {
       body: JSON.stringify({
         model: 'gpt-4o-mini-tts',
         input: text,
-        voice: voice || 'coral',
+        voice: voice || 'marin',
         instructions: 'Du er en venlig og energisk dansk løbecoach. Tal tydeligt og naturligt på dansk med et opmuntrende tonefald. Hold en rolig men motiverende stemme.',
         response_format: 'mp3',
         speed: 1.0,
