@@ -469,7 +469,7 @@ app.post('/weekplan', authMiddleware, async (req, res) => {
   }
 });
 // ═══════════════════════════════════════════════════════════════════════════════
-// TTS ENDPOINT (OpenAI Text-to-Speech — nova voice)
+// TTS ENDPOINT (OpenAI gpt-4o-mini-tts — natural voice with instructions)
 // ═══════════════════════════════════════════════════════════════════════════════
 app.post('/tts', authMiddleware, async (req, res) => {
   try {
@@ -487,9 +487,10 @@ app.post('/tts', authMiddleware, async (req, res) => {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'tts-1',
+        model: 'gpt-4o-mini-tts',
         input: text,
-        voice: voice || 'nova',
+        voice: voice || 'coral',
+        instructions: 'Du er en venlig og energisk dansk løbecoach. Tal tydeligt og naturligt på dansk med et opmuntrende tonefald. Hold en rolig men motiverende stemme.',
         response_format: 'mp3',
         speed: 1.0,
       }),
@@ -610,4 +611,3 @@ app.listen(PORT, () => {
   console.log(`🏃 RunWithAI server kører på port ${PORT}`);
   console.log(`📦 Version: 2.4.0-stripe`);
 });
-// TTS v2.5.0 
