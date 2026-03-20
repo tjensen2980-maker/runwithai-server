@@ -1,7 +1,8 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// SERVER.JS - RunWithAI Backend v2.3.0-stripe
+// SERVER.JS - RunWithAI Backend v2.5.0-challenges
 // Med delete-account endpoint (Apple App Store krav)
 // Med delete run endpoint
+// Med social challenges & streaks
 // ═══════════════════════════════════════════════════════════════════════════════
 const express = require('express');
 const cors = require('cors');
@@ -232,6 +233,11 @@ app.delete('/delete-account', authMiddleware, async (req, res) => {
       }
     }
     
+    // Clean up challenge data
+    try { await pool.query('DELETE FROM streak_log WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM challenge_participants WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query("DELETE FROM challenges WHERE creator_id = $1 AND id NOT IN (SELECT challenge_id FROM challenge_participants)", [userId]); } catch (e) {}
+    
     try { await pool.query('DELETE FROM runs WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM training_plan WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM week_plan WHERE user_id = $1', [userId]); } catch (e) {}
@@ -292,12 +298,10 @@ app.post('/create-checkout-session', authMiddleware, async (req, res) => {
     const user = userResult.rows[0];
     let customerId = user.stripe_customer_id;
     
-    // Validate existing customer or create new one
     if (customerId) {
       try {
         await stripe.customers.retrieve(customerId);
       } catch (stripeErr) {
-        // Customer doesn't exist (e.g., was created in test mode) - create new one
         console.log('Customer not found in Stripe, creating new:', customerId);
         customerId = null;
       }
@@ -383,7 +387,17 @@ app.post('/runs', authMiddleware, async (req, res) => {
       run.notes,
       run.type || 'run'
     ]);
-    res.json(result.rows[0]);
+
+    const savedRun = result.rows[0];
+
+    // ─── AUTO-LOG TO ACTIVE CHALLENGES ────────────────────────────────────
+    try {
+      await logChallengeActivity(req.userId, savedRun.id, savedRun.km, savedRun.date);
+    } catch (chalErr) {
+      console.warn('Challenge auto-log warning (run still saved):', chalErr.message);
+    }
+
+    res.json(savedRun);
   } catch (err) {
     console.error('Save run error:', err);
     res.status(500).json({ error: 'Kunne ikke gemme løb' });
@@ -405,6 +419,261 @@ app.delete('/runs/:id', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('Delete run error:', err);
     res.status(500).json({ error: 'Kunne ikke slette løb' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CHALLENGES & STREAKS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Helper: generate a short invite code
+function generateInviteCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+  return code;
+}
+
+// Helper: log activity to all active challenges for a user
+async function logChallengeActivity(userId, runId, km, date) {
+  const logDate = date ? new Date(date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+
+  const participations = await pool.query(`
+    SELECT cp.*, c.type, c.target_value
+    FROM challenge_participants cp
+    JOIN challenges c ON c.id = cp.challenge_id
+    WHERE cp.user_id = $1 AND cp.status = 'active' AND c.status = 'active'
+  `, [userId]);
+
+  for (const p of participations.rows) {
+    // Upsert streak log for today
+    await pool.query(`
+      INSERT INTO streak_log (challenge_id, user_id, log_date, km, runs_count, run_id)
+      VALUES ($1, $2, $3, $4, 1, $5)
+      ON CONFLICT (challenge_id, user_id, log_date)
+      DO UPDATE SET km = streak_log.km + $4, runs_count = streak_log.runs_count + 1
+    `, [p.challenge_id, userId, logDate, km || 0, runId || null]);
+
+    // Calculate current streak (consecutive days with activity)
+    const streakResult = await pool.query(`
+      WITH dates AS (
+        SELECT DISTINCT log_date FROM streak_log
+        WHERE challenge_id = $1 AND user_id = $2
+        ORDER BY log_date DESC
+      ),
+      numbered AS (
+        SELECT log_date, 
+               log_date - (ROW_NUMBER() OVER (ORDER BY log_date DESC))::int AS grp
+        FROM dates
+      )
+      SELECT COUNT(*) as streak
+      FROM numbered
+      WHERE grp = (SELECT grp FROM numbered LIMIT 1)
+    `, [p.challenge_id, userId]);
+
+    const currentStreak = parseInt(streakResult.rows[0]?.streak || 0);
+    const bestStreak = Math.max(currentStreak, p.best_streak);
+
+    await pool.query(`
+      UPDATE challenge_participants
+      SET current_streak = $1,
+          best_streak = $2,
+          total_km = total_km + $3,
+          total_runs = total_runs + 1,
+          last_activity_date = $4
+      WHERE challenge_id = $5 AND user_id = $6
+    `, [currentStreak, bestStreak, km || 0, logDate, p.challenge_id, userId]);
+  }
+}
+
+// ─── CREATE CHALLENGE ───────────────────────────────────────────────────────
+app.post('/challenges', authMiddleware, async (req, res) => {
+  try {
+    const { title, description, type, target_value, target_period, end_date } = req.body;
+
+    if (!title || !target_value) {
+      return res.status(400).json({ error: 'Titel og mål er påkrævet' });
+    }
+
+    const inviteCode = generateInviteCode();
+
+    const result = await pool.query(`
+      INSERT INTO challenges (creator_id, title, description, type, target_value, target_period, end_date, invite_code)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING *
+    `, [
+      req.userId,
+      title,
+      description || null,
+      type || 'streak',
+      target_value,
+      target_period || 'week',
+      end_date || null,
+      inviteCode,
+    ]);
+
+    const challenge = result.rows[0];
+
+    // Auto-join creator
+    await pool.query(`
+      INSERT INTO challenge_participants (challenge_id, user_id)
+      VALUES ($1, $2)
+    `, [challenge.id, req.userId]);
+
+    res.json(challenge);
+  } catch (err) {
+    console.error('Create challenge error:', err);
+    res.status(500).json({ error: 'Kunne ikke oprette challenge' });
+  }
+});
+
+// ─── GET MY CHALLENGES ──────────────────────────────────────────────────────
+app.get('/challenges', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT c.*, 
+             cp.current_streak, cp.best_streak, cp.total_km, cp.total_runs, cp.last_activity_date,
+             cp.status as my_status,
+             (SELECT COUNT(*) FROM challenge_participants WHERE challenge_id = c.id) as participant_count,
+             (SELECT json_agg(json_build_object(
+               'user_id', cp2.user_id,
+               'current_streak', cp2.current_streak,
+               'best_streak', cp2.best_streak,
+               'total_km', cp2.total_km,
+               'total_runs', cp2.total_runs,
+               'last_activity_date', cp2.last_activity_date,
+               'name', p.data->>'name'
+             ) ORDER BY cp2.current_streak DESC)
+              FROM challenge_participants cp2
+              LEFT JOIN profile p ON p.user_id = cp2.user_id
+              WHERE cp2.challenge_id = c.id
+             ) as leaderboard
+      FROM challenges c
+      JOIN challenge_participants cp ON cp.challenge_id = c.id AND cp.user_id = $1
+      WHERE c.status = 'active'
+      ORDER BY c.created_at DESC
+    `, [req.userId]);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get challenges error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente challenges' });
+  }
+});
+
+// ─── JOIN CHALLENGE BY INVITE CODE ──────────────────────────────────────────
+app.post('/challenges/join', authMiddleware, async (req, res) => {
+  try {
+    const { invite_code } = req.body;
+
+    if (!invite_code) {
+      return res.status(400).json({ error: 'Invite-kode påkrævet' });
+    }
+
+    const challenge = await pool.query(
+      'SELECT * FROM challenges WHERE invite_code = $1 AND status = $2',
+      [invite_code.toUpperCase(), 'active']
+    );
+
+    if (challenge.rows.length === 0) {
+      return res.status(404).json({ error: 'Challenge ikke fundet eller er afsluttet' });
+    }
+
+    const ch = challenge.rows[0];
+
+    const existing = await pool.query(
+      'SELECT id FROM challenge_participants WHERE challenge_id = $1 AND user_id = $2',
+      [ch.id, req.userId]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'Du er allerede med i denne challenge' });
+    }
+
+    await pool.query(`
+      INSERT INTO challenge_participants (challenge_id, user_id)
+      VALUES ($1, $2)
+    `, [ch.id, req.userId]);
+
+    res.json({ success: true, challenge: ch });
+  } catch (err) {
+    console.error('Join challenge error:', err);
+    res.status(500).json({ error: 'Kunne ikke tilmelde challenge' });
+  }
+});
+
+// ─── LOG ACTIVITY (manual — auto-log happens in POST /runs) ─────────────────
+app.post('/challenges/log', authMiddleware, async (req, res) => {
+  try {
+    const { run_id, km, date } = req.body;
+    await logChallengeActivity(req.userId, run_id, km, date);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Log challenge activity error:', err);
+    res.status(500).json({ error: 'Kunne ikke logge aktivitet' });
+  }
+});
+
+// ─── GET CHALLENGE DETAILS ──────────────────────────────────────────────────
+app.get('/challenges/:id', authMiddleware, async (req, res) => {
+  try {
+    const challengeId = req.params.id;
+
+    const challenge = await pool.query('SELECT * FROM challenges WHERE id = $1', [challengeId]);
+    if (challenge.rows.length === 0) {
+      return res.status(404).json({ error: 'Challenge ikke fundet' });
+    }
+
+    const participants = await pool.query(`
+      SELECT cp.*, p.data->>'name' as name
+      FROM challenge_participants cp
+      LEFT JOIN profile p ON p.user_id = cp.user_id
+      WHERE cp.challenge_id = $1
+      ORDER BY cp.current_streak DESC, cp.total_km DESC
+    `, [challengeId]);
+
+    const recentActivity = await pool.query(`
+      SELECT sl.*, p.data->>'name' as name
+      FROM streak_log sl
+      LEFT JOIN profile p ON p.user_id = sl.user_id
+      WHERE sl.challenge_id = $1 AND sl.log_date >= CURRENT_DATE - 7
+      ORDER BY sl.log_date DESC, sl.created_at DESC
+    `, [challengeId]);
+
+    res.json({
+      ...challenge.rows[0],
+      participants: participants.rows,
+      recent_activity: recentActivity.rows,
+    });
+  } catch (err) {
+    console.error('Get challenge details error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente challenge-detaljer' });
+  }
+});
+
+// ─── LEAVE CHALLENGE ────────────────────────────────────────────────────────
+app.delete('/challenges/:id/leave', authMiddleware, async (req, res) => {
+  try {
+    const challengeId = req.params.id;
+
+    await pool.query(
+      'DELETE FROM challenge_participants WHERE challenge_id = $1 AND user_id = $2',
+      [challengeId, req.userId]
+    );
+
+    const remaining = await pool.query(
+      'SELECT COUNT(*) as count FROM challenge_participants WHERE challenge_id = $1',
+      [challengeId]
+    );
+
+    if (parseInt(remaining.rows[0].count) === 0) {
+      await pool.query("UPDATE challenges SET status = 'canceled' WHERE id = $1", [challengeId]);
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Leave challenge error:', err);
+    res.status(500).json({ error: 'Kunne ikke forlade challenge' });
   }
 });
 
@@ -502,7 +771,6 @@ app.post('/tts', authMiddleware, async (req, res) => {
       return res.status(openaiRes.status).json({ error: 'TTS fejl' });
     }
 
-    // Stream MP3 direkte til klienten
     res.set({
       'Content-Type': 'audio/mpeg',
       'Cache-Control': 'no-cache',
@@ -602,12 +870,12 @@ app.delete('/messages', authMiddleware, async (req, res) => {
 // ROOT ENDPOINT
 // ═══════════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({ status: 'RunWithAI server kører!', version: '2.4.0-stripe' });
+  res.json({ status: 'RunWithAI server kører!', version: '2.5.0-challenges' });
 });
 // ═══════════════════════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`🏃 RunWithAI server kører på port ${PORT}`);
-  console.log(`📦 Version: 2.4.0-stripe`);
+  console.log(`📦 Version: 2.5.0-challenges`);
 });
