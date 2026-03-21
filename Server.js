@@ -1,9 +1,10 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// SERVER.JS - RunWithAI Backend v2.6.0-photo-story
+// SERVER.JS - RunWithAI Backend v2.7.0-friends
 // Med delete-account endpoint (Apple App Store krav)
 // Med delete run endpoint
 // Med social challenges & streaks
 // Med AI photo story
+// Med friends endpoints
 // ═══════════════════════════════════════════════════════════════════════════════
 const express = require('express');
 const cors = require('cors');
@@ -242,6 +243,9 @@ app.delete('/delete-account', authMiddleware, async (req, res) => {
     // Clean up photo story data
     try { await pool.query('DELETE FROM run_photos WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM run_stories WHERE user_id = $1', [userId]); } catch (e) {}
+    
+    // Clean up friends data
+    try { await pool.query('DELETE FROM friends WHERE user_id = $1 OR friend_id = $1', [userId]); } catch (e) {}
     
     try { await pool.query('DELETE FROM runs WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM training_plan WHERE user_id = $1', [userId]); } catch (e) {}
@@ -1082,15 +1086,146 @@ app.delete('/messages', authMiddleware, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// FRIENDS ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── GET MY FRIENDS ─────────────────────────────────────────────────────────
+app.get('/friends', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT f.id, f.status, f.created_at,
+        CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END as friend_user_id,
+        p.data->>'name' as name,
+        p.data->>'avatar' as avatar
+      FROM friends f
+      LEFT JOIN profile p ON p.user_id = CASE WHEN f.user_id = $1 THEN f.friend_id ELSE f.user_id END
+      WHERE (f.user_id = $1 OR f.friend_id = $1)
+      ORDER BY f.created_at DESC
+    `, [req.userId]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get friends error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente venner' });
+  }
+});
+
+// ─── SEND FRIEND REQUEST ────────────────────────────────────────────────────
+app.post('/friends/request', authMiddleware, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email påkrævet' });
+
+    const userResult = await pool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Bruger ikke fundet' });
+    }
+
+    const friendId = userResult.rows[0].id;
+    if (friendId === req.userId) {
+      return res.status(400).json({ error: 'Du kan ikke tilføje dig selv' });
+    }
+
+    const existing = await pool.query(
+      `SELECT id, status FROM friends
+       WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)`,
+      [req.userId, friendId]
+    );
+
+    if (existing.rows.length > 0) {
+      const status = existing.rows[0].status;
+      if (status === 'accepted') return res.status(400).json({ error: 'I er allerede venner' });
+      if (status === 'pending') return res.status(400).json({ error: 'Anmodning allerede sendt' });
+    }
+
+    await pool.query(
+      `INSERT INTO friends (user_id, friend_id, status, created_at)
+       VALUES ($1, $2, 'pending', NOW())`,
+      [req.userId, friendId]
+    );
+
+    res.json({ success: true, message: 'Anmodning sendt!' });
+  } catch (err) {
+    console.error('Friend request error:', err);
+    res.status(500).json({ error: 'Kunne ikke sende anmodning' });
+  }
+});
+
+// ─── RESPOND TO FRIEND REQUEST ──────────────────────────────────────────────
+app.post('/friends/:id/respond', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { accept } = req.body;
+
+    if (accept) {
+      await pool.query(
+        `UPDATE friends SET status = 'accepted' WHERE id = $1 AND friend_id = $2`,
+        [id, req.userId]
+      );
+      res.json({ success: true, message: 'Venneanmodning accepteret!' });
+    } else {
+      await pool.query(
+        `DELETE FROM friends WHERE id = $1 AND friend_id = $2`,
+        [id, req.userId]
+      );
+      res.json({ success: true, message: 'Venneanmodning afvist' });
+    }
+  } catch (err) {
+    console.error('Respond to friend error:', err);
+    res.status(500).json({ error: 'Kunne ikke svare på anmodning' });
+  }
+});
+
+// ─── REMOVE FRIEND ──────────────────────────────────────────────────────────
+app.delete('/friends/:id', authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.query(
+      `DELETE FROM friends WHERE id = $1 AND (user_id = $2 OR friend_id = $2)`,
+      [id, req.userId]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Remove friend error:', err);
+    res.status(500).json({ error: 'Kunne ikke fjerne ven' });
+  }
+});
+
+// ─── FRIENDS FEED ───────────────────────────────────────────────────────────
+app.get('/friends/feed', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT r.id, r.km, r.duration, r.pace, r.date, r.type, r.created_at,
+        p.data->>'name' as name,
+        p.data->>'avatar' as avatar,
+        r.user_id
+      FROM runs r
+      JOIN profile p ON p.user_id = r.user_id
+      WHERE r.user_id IN (
+        SELECT CASE WHEN user_id = $1 THEN friend_id ELSE user_id END
+        FROM friends
+        WHERE (user_id = $1 OR friend_id = $1) AND status = 'accepted'
+      )
+      AND r.created_at > NOW() - INTERVAL '7 days'
+      ORDER BY r.created_at DESC
+      LIMIT 20
+    `, [req.userId]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Friends feed error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente feed' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ROOT ENDPOINT
 // ═══════════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({ status: 'RunWithAI server kører!', version: '2.6.0-photo-story' });
+  res.json({ status: 'RunWithAI server kører!', version: '2.7.0-friends' });
 });
 // ═══════════════════════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`🏃 RunWithAI server kører på port ${PORT}`);
-  console.log(`📦 Version: 2.6.0-photo-story`);
+  console.log(`📦 Version: 2.7.0-friends`);
 });
