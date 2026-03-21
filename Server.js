@@ -1,10 +1,11 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// SERVER.JS - RunWithAI Backend v2.7.0-friends
+// SERVER.JS - RunWithAI Backend v2.8.0-voice-coach
 // Med delete-account endpoint (Apple App Store krav)
 // Med delete run endpoint
 // Med social challenges & streaks
 // Med AI photo story
 // Med friends endpoints
+// Med voice coach (Whisper + AI)
 // ═══════════════════════════════════════════════════════════════════════════════
 const express = require('express');
 const cors = require('cors');
@@ -12,8 +13,10 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const Stripe = require('stripe');
+const multer = require('multer');
 const app = express();
 const PORT = process.env.PORT || 3000;
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 // ─── DATABASE ───────────────────────────────────────────────────────────────
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -1217,15 +1220,124 @@ app.get('/friends/feed', authMiddleware, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// VOICE COACH ENDPOINT (Whisper transcription + AI response)
+// ═══════════════════════════════════════════════════════════════════════════════
+app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res) => {
+  try {
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) {
+      return res.status(500).json({ error: 'OpenAI API not configured' });
+    }
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No audio file' });
+    }
+
+    // Get user profile for name
+    const profileResult = await pool.query('SELECT data FROM profile WHERE user_id = $1', [req.userId]);
+    const profileData = profileResult.rows[0]?.data;
+    const userName = (typeof profileData === 'string' ? JSON.parse(profileData) : profileData)?.name || 'løber';
+
+    // Parse run context
+    let runContext = {};
+    try {
+      if (req.body.context) runContext = JSON.parse(req.body.context);
+    } catch {}
+
+    // ─── Step 1: Transcribe with Whisper ──────────────────────────────
+    const FormData = (await import('form-data')).default;
+    const whisperForm = new FormData();
+    whisperForm.append('file', req.file.buffer, {
+      filename: 'voice.m4a',
+      contentType: req.file.mimetype || 'audio/m4a',
+    });
+    whisperForm.append('model', 'whisper-1');
+    whisperForm.append('language', 'da');
+
+    const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        ...whisperForm.getHeaders(),
+      },
+      body: whisperForm,
+    });
+
+    if (!whisperRes.ok) {
+      const err = await whisperRes.text();
+      console.error('Whisper error:', err);
+      return res.status(500).json({ error: 'Transcription failed' });
+    }
+
+    const whisperData = await whisperRes.json();
+    const userText = whisperData.text;
+    console.log(`[VoiceCoach] User said: "${userText}"`);
+
+    if (!userText || userText.trim().length === 0) {
+      return res.json({ text: 'Jeg hørte dig ikke helt, prøv igen.', transcription: '' });
+    }
+
+    // ─── Step 2: AI Coach response ────────────────────────────────────
+    const kmStr = runContext.km ? `${runContext.km.toFixed(1)} km` : 'ukendt';
+    const paceStr = runContext.pace ? `${Math.floor(runContext.pace)}:${String(Math.round((runContext.pace % 1) * 60)).padStart(2, '0')} min/km` : 'ukendt';
+    const durationMins = runContext.duration ? Math.floor(runContext.duration / 60) : 0;
+
+    const systemPrompt = `Du er en venlig og energisk dansk løbecoach i appen RunWithAI. Brugeren hedder ${userName} og er midt i et løb.
+
+Aktuelle løbdata:
+- Distance: ${kmStr}
+- Pace: ${paceStr}
+- Tid: ${durationMins} minutter
+
+Regler:
+- Svar KORT (max 2-3 sætninger) — brugeren løber og kan ikke læse lange svar
+- Vær opmuntrende og positiv
+- Svar på dansk
+- Hvis de spørger om deres tempo/distance, brug de aktuelle data
+- Hvis de beder om motivation, giv en kort energisk peptalk
+- Hvis de vil vide noget om løb/træning, giv et kort svar`;
+
+    const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userText },
+        ],
+        max_tokens: 150,
+        temperature: 0.7,
+      }),
+    });
+
+    const aiData = await aiRes.json();
+    const responseText = aiData.choices?.[0]?.message?.content || 'Godt klaret, bliv ved!';
+    console.log(`[VoiceCoach] AI response: "${responseText}"`);
+
+    res.json({
+      text: responseText,
+      transcription: userText,
+    });
+  } catch (err) {
+    console.error('Voice coach error:', err);
+    res.status(500).json({ error: 'Voice coach fejl' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ROOT ENDPOINT
 // ═══════════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({ status: 'RunWithAI server kører!', version: '2.7.0-friends' });
+  res.json({ status: 'RunWithAI server kører!', version: '2.8.0-voice-coach' });
 });
 // ═══════════════════════════════════════════════════════════════════════════════
 // START SERVER
 // ═══════════════════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`🏃 RunWithAI server kører på port ${PORT}`);
-  console.log(`📦 Version: 2.7.0-friends`);
+  console.log(`📦 Version: 2.8.0-voice-coach`);
 });
