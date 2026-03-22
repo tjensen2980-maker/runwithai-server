@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "5b6d30d0-a79f-45e7-8c39-cd228a518fb0"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "com.tj2970.runwithaiserver",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    }
+  }
+}

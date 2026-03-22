@@ -1245,12 +1245,9 @@ app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res
     } catch {}
 
     // ─── Step 1: Transcribe with Whisper ──────────────────────────────
-    const FormData = (await import('form-data')).default;
     const whisperForm = new FormData();
-    whisperForm.append('file', req.file.buffer, {
-      filename: 'voice.m4a',
-      contentType: req.file.mimetype || 'audio/m4a',
-    });
+    const audioBlob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/m4a' });
+    whisperForm.append('file', audioBlob, 'voice.m4a');
     whisperForm.append('model', 'whisper-1');
     whisperForm.append('language', 'da');
 
@@ -1258,7 +1255,6 @@ app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${OPENAI_API_KEY}`,
-        ...whisperForm.getHeaders(),
       },
       body: whisperForm,
     });
