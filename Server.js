@@ -42,6 +42,8 @@ const TIERS = {
 
 // ─── PASSWORD RESET CODES (in-memory store) ─────────────────────────────────
 const resetCodes = new Map(); // email -> { code, expires, userId }
+const { Resend } = require('resend');
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
 function generateResetCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -219,15 +221,12 @@ app.post('/forgot-password', async (req, res) => {
     // Log code (for testing - in production this would only be sent via email)
     console.log(`[PASSWORD RESET] Code for ${email}: ${code}`);
 
-    // Send email with code if SendGrid is configured
-    if (process.env.SENDGRID_API_KEY) {
+    // Send email with code using Resend
+    if (resend) {
       try {
-        const sgMail = require('@sendgrid/mail');
-        sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-        
-        await sgMail.send({
+        await resend.emails.send({
+          from: 'RunWithAI <onboarding@resend.dev>',
           to: email,
-          from: process.env.FROM_EMAIL || 'noreply@runwithai.app',
           subject: 'Nulstil din RunWithAI adgangskode',
           html: `
             <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
@@ -245,10 +244,9 @@ app.post('/forgot-password', async (req, res) => {
             </div>
           `,
         });
-        console.log(`[PASSWORD RESET] Email sent to ${email}`);
+        console.log(`[PASSWORD RESET] Email sent to ${email} via Resend`);
       } catch (emailErr) {
-        console.error('[PASSWORD RESET] Email send failed:', emailErr.message);
-        // Continue anyway - code is logged and user can request new code
+        console.error('[PASSWORD RESET] Resend email failed:', emailErr.message);
       }
     }
 
