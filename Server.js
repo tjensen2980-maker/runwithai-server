@@ -1,12 +1,13 @@
-// ═══════════════════════════════════════════════════════════════════════════════
-// SERVER.JS - RunWithAI Backend v2.8.0-voice-coach
+// ═══════════════════════════════════════════════════════════════════════════
+// SERVER.JS - RunWithAI Backend v2.9.0-password-reset
 // Med delete-account endpoint (Apple App Store krav)
 // Med delete run endpoint
 // Med social challenges & streaks
 // Med AI photo story
 // Med friends endpoints
 // Med voice coach (Whisper + AI)
-// ═══════════════════════════════════════════════════════════════════════════════
+// Med password reset endpoints
+// ═══════════════════════════════════════════════════════════════════════════
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -17,13 +18,16 @@ const multer = require('multer');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
 // ─── DATABASE ───────────────────────────────────────────────────────────────
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
 // ─── STRIPE ─────────────────────────────────────────────────────────────────
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
 // ─── SUBSCRIPTION TIERS ─────────────────────────────────────────────────────
 const TIERS = {
   free: {
@@ -35,6 +39,14 @@ const TIERS = {
     features: ['basic_tracking', 'weekly_stats', 'ai_coach', 'badges', 'streaks', 'pulse_zones', 'garmin_sync', 'social_feed', 'export_data', 'unlimited_runs']
   }
 };
+
+// ─── PASSWORD RESET CODES (in-memory store) ─────────────────────────────────
+const resetCodes = new Map(); // email -> { code, expires, userId }
+
+function generateResetCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
 // ─── MIDDLEWARE ─────────────────────────────────────────────────────────────
 // Stripe webhook MUST be before express.json()
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
@@ -52,7 +64,7 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
       const customerId = session.customer;
       const subscriptionId = session.subscription;
       await pool.query(`
-        UPDATE users 
+        UPDATE users
         SET subscription_tier = 'pro',
             subscription_status = 'active',
             stripe_subscription_id = $1
@@ -66,19 +78,19 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
       const status = subscription.status;
       const customerId = subscription.customer;
       await pool.query(`
-        UPDATE users 
+        UPDATE users
         SET subscription_status = $1,
             subscription_ends_at = to_timestamp($2)
         WHERE stripe_customer_id = $3
       `, [status, subscription.current_period_end, customerId]);
-      console.log('📝 Subscription updated:', status);
+      console.log('🔄 Subscription updated:', status);
       break;
     }
     case 'customer.subscription.deleted': {
       const subscription = event.data.object;
       const customerId = subscription.customer;
       await pool.query(`
-        UPDATE users 
+        UPDATE users
         SET subscription_tier = 'free',
             subscription_status = 'canceled',
             stripe_subscription_id = NULL
@@ -90,11 +102,14 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
   }
   res.json({ received: true });
 });
+
 // JSON parsing for other routes
 app.use(express.json({ limit: '10mb' }));
 app.use(cors());
+
 // ─── JWT SECRET ─────────────────────────────────────────────────────────────
 const JWT_SECRET = process.env.JWT_SECRET || 'runwithai-secret-key-2024';
+
 // ─── AUTH MIDDLEWARE ────────────────────────────────────────────────────────
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -110,9 +125,10 @@ const authMiddleware = async (req, res, next) => {
     return res.status(401).json({ error: 'Ugyldig token' });
   }
 };
-// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
 // AUTH ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.post('/register', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -125,8 +141,8 @@ app.post('/register', async (req, res) => {
     }
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      `INSERT INTO users (email, password, subscription_tier, subscription_status, created_at) 
-       VALUES ($1, $2, 'free', 'active', NOW()) 
+      `INSERT INTO users (email, password, subscription_tier, subscription_status, created_at)
+       VALUES ($1, $2, 'free', 'active', NOW())
        RETURNING id, email`,
       [email.toLowerCase(), hashedPassword]
     );
@@ -138,6 +154,7 @@ app.post('/register', async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke oprette bruger' });
   }
 });
+
 app.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -154,22 +171,177 @@ app.post('/login', async (req, res) => {
       return res.status(401).json({ error: 'Forkert email eller adgangskode' });
     }
     const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
-    res.json({ 
-      token, 
-      user: { 
-        id: user.id, 
+    res.json({
+      token,
+      user: {
+        id: user.id,
         email: user.email,
         subscription_tier: user.subscription_tier || 'free'
-      } 
+      }
     });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Login fejlede' });
   }
 });
-// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PASSWORD RESET ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── FORGOT PASSWORD ────────────────────────────────────────────────────────
+app.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    if (!email) {
+      return res.status(400).json({ error: 'Email påkrævet' });
+    }
+
+    // Check if user exists
+    const userResult = await pool.query(
+      'SELECT id, email FROM users WHERE email = $1',
+      [email.toLowerCase()]
+    );
+
+    if (userResult.rows.length === 0) {
+      // Don't reveal if email exists - return success anyway for security
+      return res.json({ success: true, message: 'Hvis emailen findes, sender vi en kode' });
+    }
+
+    const user = userResult.rows[0];
+    const code = generateResetCode();
+    const expires = Date.now() + 15 * 60 * 1000; // 15 minutes
+
+    // Store code
+    resetCodes.set(email.toLowerCase(), { code, expires, userId: user.id });
+
+    // Log code (for testing - in production this would only be sent via email)
+    console.log(`[PASSWORD RESET] Code for ${email}: ${code}`);
+
+    // Send email with code if SendGrid is configured
+    if (process.env.SENDGRID_API_KEY) {
+      try {
+        const sgMail = require('@sendgrid/mail');
+        sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+        
+        await sgMail.send({
+          to: email,
+          from: process.env.FROM_EMAIL || 'noreply@runwithai.app',
+          subject: 'Nulstil din RunWithAI adgangskode',
+          html: `
+            <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
+              <h2 style="color: #fa3c00; margin-bottom: 24px;">🏃 RunWithAI</h2>
+              <p style="font-size: 16px; color: #333;">Hej!</p>
+              <p style="font-size: 16px; color: #333;">Du har anmodet om at nulstille din adgangskode.</p>
+              <p style="font-size: 16px; color: #333;">Din nulstillingskode er:</p>
+              <div style="background: #f5f5f5; padding: 24px; text-align: center; font-size: 36px; font-weight: bold; letter-spacing: 6px; margin: 24px 0; border-radius: 12px; color: #fa3c00;">
+                ${code}
+              </div>
+              <p style="font-size: 14px; color: #666;">Koden udløber om 15 minutter.</p>
+              <p style="font-size: 14px; color: #666;">Hvis du ikke har anmodet om dette, kan du ignorere denne email.</p>
+              <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">
+              <p style="font-size: 12px; color: #999;">Venlig hilsen,<br>RunWithAI Team</p>
+            </div>
+          `,
+        });
+        console.log(`[PASSWORD RESET] Email sent to ${email}`);
+      } catch (emailErr) {
+        console.error('[PASSWORD RESET] Email send failed:', emailErr.message);
+        // Continue anyway - code is logged and user can request new code
+      }
+    }
+
+    res.json({ success: true, message: 'Nulstillingskode sendt til din email' });
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Kunne ikke sende nulstillingskode' });
+  }
+});
+
+// ─── RESET PASSWORD ─────────────────────────────────────────────────────────
+app.post('/reset-password', async (req, res) => {
+  try {
+    const { email, code, newPassword } = req.body;
+
+    if (!email || !code || !newPassword) {
+      return res.status(400).json({ error: 'Email, kode og ny adgangskode påkrævet' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: 'Adgangskode skal være mindst 6 tegn' });
+    }
+
+    // Check reset code
+    const resetData = resetCodes.get(email.toLowerCase());
+    
+    if (!resetData) {
+      return res.status(400).json({ error: 'Ingen nulstillingsanmodning fundet. Anmod om ny kode.' });
+    }
+
+    if (Date.now() > resetData.expires) {
+      resetCodes.delete(email.toLowerCase());
+      return res.status(400).json({ error: 'Koden er udløbet. Anmod om ny kode.' });
+    }
+
+    if (resetData.code !== code) {
+      return res.status(400).json({ error: 'Forkert kode' });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update password
+    await pool.query(
+      'UPDATE users SET password = $1 WHERE id = $2',
+      [hashedPassword, resetData.userId]
+    );
+
+    // Remove used code
+    resetCodes.delete(email.toLowerCase());
+
+    console.log(`[PASSWORD RESET] Password updated for ${email}`);
+    res.json({ success: true, message: 'Adgangskode nulstillet' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Kunne ikke nulstille adgangskode' });
+  }
+});
+
+// ─── VERIFY RESET CODE (optional) ───────────────────────────────────────────
+app.post('/verify-reset-code', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    if (!email || !code) {
+      return res.status(400).json({ error: 'Email og kode påkrævet' });
+    }
+
+    const resetData = resetCodes.get(email.toLowerCase());
+    
+    if (!resetData) {
+      return res.status(400).json({ error: 'Ingen nulstillingsanmodning fundet' });
+    }
+
+    if (Date.now() > resetData.expires) {
+      resetCodes.delete(email.toLowerCase());
+      return res.status(400).json({ error: 'Koden er udløbet' });
+    }
+
+    if (resetData.code !== code) {
+      return res.status(400).json({ error: 'Forkert kode' });
+    }
+
+    res.json({ valid: true });
+  } catch (err) {
+    console.error('Verify reset code error:', err);
+    res.status(500).json({ error: 'Kunne ikke verificere kode' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // PROFILE ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/profile', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -185,13 +357,14 @@ app.get('/profile', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente profil' });
   }
 });
+
 app.put('/profile', authMiddleware, async (req, res) => {
   try {
     const profileData = req.body;
     await pool.query(`
       INSERT INTO profile (user_id, data, updated_at)
       VALUES ($1, $2, NOW())
-      ON CONFLICT (user_id) 
+      ON CONFLICT (user_id)
       DO UPDATE SET data = $2, updated_at = NOW()
     `, [req.userId, JSON.stringify(profileData)]);
     res.json({ success: true });
@@ -200,29 +373,30 @@ app.put('/profile', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke gemme profil' });
   }
 });
-// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
 // DELETE ACCOUNT ENDPOINT (Apple App Store krav)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.delete('/delete-account', authMiddleware, async (req, res) => {
   const userId = req.userId;
   console.log(`Delete account request for userId: ${userId}`);
-  
+
   try {
     await pool.query('BEGIN');
-    
+
     const userResult = await pool.query(
-      'SELECT email, stripe_customer_id FROM users WHERE id = $1', 
+      'SELECT email, stripe_customer_id FROM users WHERE id = $1',
       [userId]
     );
     const user = userResult.rows[0];
-    
+
     if (!user) {
       await pool.query('ROLLBACK');
       return res.status(404).json({ error: 'Bruger ikke fundet' });
     }
-    
+
     console.log(`Deleting account for: ${user.email}`);
-    
+
     if (user.stripe_customer_id && stripe) {
       try {
         const subscriptions = await stripe.subscriptions.list({
@@ -237,27 +411,27 @@ app.delete('/delete-account', authMiddleware, async (req, res) => {
         console.log('Stripe cleanup warning (continuing):', stripeErr.message);
       }
     }
-    
+
     // Clean up challenge data
     try { await pool.query('DELETE FROM streak_log WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM challenge_participants WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query("DELETE FROM challenges WHERE creator_id = $1 AND id NOT IN (SELECT challenge_id FROM challenge_participants)", [userId]); } catch (e) {}
-    
+
     // Clean up photo story data
     try { await pool.query('DELETE FROM run_photos WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM run_stories WHERE user_id = $1', [userId]); } catch (e) {}
-    
+
     // Clean up friends data
     try { await pool.query('DELETE FROM friends WHERE user_id = $1 OR friend_id = $1', [userId]); } catch (e) {}
-    
+
     try { await pool.query('DELETE FROM runs WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM training_plan WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM week_plan WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM profile WHERE user_id = $1', [userId]); } catch (e) {}
-    
+
     await pool.query('DELETE FROM users WHERE id = $1', [userId]);
     await pool.query('COMMIT');
-    
+
     console.log(`✅ Account deleted successfully: userId=${userId}, email=${user.email}`);
     res.json({ success: true, message: 'Din konto og alle data er blevet slettet permanent.' });
   } catch (err) {
@@ -266,13 +440,14 @@ app.delete('/delete-account', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke slette konto. Prøv igen senere.' });
   }
 });
-// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
 // SUBSCRIPTION ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/subscription', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT subscription_tier, subscription_status, subscription_ends_at 
+      `SELECT subscription_tier, subscription_status, subscription_ends_at
        FROM users WHERE id = $1`,
       [req.userId]
     );
@@ -283,8 +458,8 @@ app.get('/subscription', authMiddleware, async (req, res) => {
     const tier = user.subscription_tier || 'free';
     const tierConfig = TIERS[tier] || TIERS.free;
     const runsResult = await pool.query(`
-      SELECT COUNT(*) as count FROM runs 
-      WHERE user_id = $1 
+      SELECT COUNT(*) as count FROM runs
+      WHERE user_id = $1
       AND date >= date_trunc('month', CURRENT_DATE)
     `, [req.userId]);
     const runsThisMonth = parseInt(runsResult.rows[0].count);
@@ -303,13 +478,14 @@ app.get('/subscription', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente abonnement' });
   }
 });
+
 app.post('/create-checkout-session', authMiddleware, async (req, res) => {
   try {
     const { interval } = req.body;
     const userResult = await pool.query('SELECT email, stripe_customer_id FROM users WHERE id = $1', [req.userId]);
     const user = userResult.rows[0];
     let customerId = user.stripe_customer_id;
-    
+
     if (customerId) {
       try {
         await stripe.customers.retrieve(customerId);
@@ -318,7 +494,7 @@ app.post('/create-checkout-session', authMiddleware, async (req, res) => {
         customerId = null;
       }
     }
-    
+
     if (!customerId) {
       const customer = await stripe.customers.create({
         email: user.email,
@@ -328,12 +504,12 @@ app.post('/create-checkout-session', authMiddleware, async (req, res) => {
       await pool.query('UPDATE users SET stripe_customer_id = $1 WHERE id = $2', [customerId, req.userId]);
       console.log('Created new Stripe customer:', customerId);
     }
-    
-    const priceId = interval === 'yearly' 
-      ? process.env.STRIPE_PRICE_PRO_YEARLY 
+
+    const priceId = interval === 'yearly'
+      ? process.env.STRIPE_PRICE_PRO_YEARLY
       : process.env.STRIPE_PRICE_PRO_MONTHLY;
     console.log('Creating checkout session with price:', priceId, 'for customer:', customerId);
-    
+
     const session = await stripe.checkout.sessions.create({
       customer: customerId,
       payment_method_types: ['card'],
@@ -348,6 +524,7 @@ app.post('/create-checkout-session', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke starte checkout' });
   }
 });
+
 app.post('/create-portal-session', authMiddleware, async (req, res) => {
   try {
     const userResult = await pool.query('SELECT stripe_customer_id FROM users WHERE id = $1', [req.userId]);
@@ -365,9 +542,10 @@ app.post('/create-portal-session', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke åbne kundeportal' });
   }
 });
-// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
 // RUNS ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/runs', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -380,6 +558,7 @@ app.get('/runs', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente løb' });
   }
 });
+
 app.post('/runs', authMiddleware, async (req, res) => {
   try {
     const run = req.body;
@@ -434,9 +613,9 @@ app.delete('/runs/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 // CHALLENGES & STREAKS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 
 // Helper: generate a short invite code
 function generateInviteCode() {
@@ -474,7 +653,7 @@ async function logChallengeActivity(userId, runId, km, date) {
         ORDER BY log_date DESC
       ),
       numbered AS (
-        SELECT log_date, 
+        SELECT log_date,
                log_date - (ROW_NUMBER() OVER (ORDER BY log_date DESC))::int AS grp
         FROM dates
       )
@@ -543,7 +722,7 @@ app.post('/challenges', authMiddleware, async (req, res) => {
 app.get('/challenges', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT c.*, 
+      SELECT c.*,
              cp.current_streak, cp.best_streak, cp.total_km, cp.total_runs, cp.last_activity_date,
              cp.status as my_status,
              (SELECT COUNT(*) FROM challenge_participants WHERE challenge_id = c.id) as participant_count,
@@ -614,7 +793,7 @@ app.post('/challenges/join', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── LOG ACTIVITY (manual — auto-log happens in POST /runs) ─────────────────
+// ─── LOG ACTIVITY (manual – auto-log happens in POST /runs) ─────────────────
 app.post('/challenges/log', authMiddleware, async (req, res) => {
   try {
     const { run_id, km, date } = req.body;
@@ -689,9 +868,9 @@ app.delete('/challenges/:id/leave', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 // PHOTO STORY ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 
 // ─── UPLOAD PHOTO DURING RUN ────────────────────────────────────────────────
 app.post('/runs/:runId/photos', authMiddleware, async (req, res) => {
@@ -767,7 +946,7 @@ app.post('/runs/:runId/story', authMiddleware, async (req, res) => {
     // Build prompt for AI story
     const photoDescriptions = photos.rows.map((p, i) => {
       const time = new Date(p.taken_at).toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit' });
-      return `Foto ${i + 1}: taget kl. ${time}${p.caption ? ` — "${p.caption}"` : ''}${p.latitude ? ` (${parseFloat(p.latitude).toFixed(4)}, ${parseFloat(p.longitude).toFixed(4)})` : ''}`;
+      return `Foto ${i + 1}: taget kl. ${time}${p.caption ? ` – "${p.caption}"` : ''}${p.latitude ? ` (${parseFloat(p.latitude).toFixed(4)}, ${parseFloat(p.longitude).toFixed(4)})` : ''}`;
     }).join('\n');
 
     const prompt = `Du er en kreativ løbe-historiefortæller for appen RunWithAI. Skriv en kort, engagerende løbe-story på dansk (max 200 ord) baseret på dette løb:
@@ -899,9 +1078,9 @@ app.get('/feed/stories', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 // TRAINING PLAN ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/trainingplan', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -914,13 +1093,14 @@ app.get('/trainingplan', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente træningsplan' });
   }
 });
+
 app.post('/trainingplan/save', authMiddleware, async (req, res) => {
   try {
     const { data } = req.body;
     await pool.query(`
       INSERT INTO training_plan (user_id, data, generated_at)
       VALUES ($1, $2, NOW())
-      ON CONFLICT (user_id) 
+      ON CONFLICT (user_id)
       DO UPDATE SET data = $2, generated_at = NOW()
     `, [req.userId, JSON.stringify(data)]);
     res.json({ success: true });
@@ -929,9 +1109,10 @@ app.post('/trainingplan/save', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke gemme træningsplan' });
   }
 });
-// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
 // WEEK PLAN ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/weekplan', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -944,13 +1125,14 @@ app.get('/weekplan', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente ugeplan' });
   }
 });
+
 app.post('/weekplan', authMiddleware, async (req, res) => {
   try {
     const data = req.body;
     await pool.query(`
       INSERT INTO week_plan (user_id, data, updated_at)
       VALUES ($1, $2, NOW())
-      ON CONFLICT (user_id) 
+      ON CONFLICT (user_id)
       DO UPDATE SET data = $2, updated_at = NOW()
     `, [req.userId, JSON.stringify(data)]);
     res.json({ success: true });
@@ -959,9 +1141,10 @@ app.post('/weekplan', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke gemme ugeplan' });
   }
 });
-// ═══════════════════════════════════════════════════════════════════════════════
-// TTS ENDPOINT (OpenAI gpt-4o-mini-tts — natural voice with instructions)
-// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TTS ENDPOINT (OpenAI gpt-4o-mini-tts – natural voice with instructions)
+// ═══════════════════════════════════════════════════════════════════════════
 app.post('/tts', authMiddleware, async (req, res) => {
   try {
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -1005,9 +1188,9 @@ app.post('/tts', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 // AI CHAT ENDPOINT (proxy to Anthropic API)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.post('/chat', authMiddleware, async (req, res) => {
   try {
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -1041,9 +1224,9 @@ app.post('/chat', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 // MESSAGES ENDPOINTS (chat history)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/messages', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -1088,9 +1271,9 @@ app.delete('/messages', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 // FRIENDS ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 
 // ─── GET MY FRIENDS ─────────────────────────────────────────────────────────
 app.get('/friends', authMiddleware, async (req, res) => {
@@ -1219,9 +1402,9 @@ app.get('/friends/feed', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 // VOICE COACH ENDPOINT (Whisper transcription + AI response)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res) => {
   try {
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -1244,7 +1427,7 @@ app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res
       if (req.body.context) runContext = JSON.parse(req.body.context);
     } catch {}
 
-    // ─── Step 1: Transcribe with Whisper ──────────────────────────────
+    // ─── Step 1: Transcribe with Whisper ──────────────────────────────────
     const whisperForm = new FormData();
     const audioBlob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/m4a' });
     whisperForm.append('file', audioBlob, 'voice.m4a');
@@ -1273,7 +1456,7 @@ app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res
       return res.json({ text: 'Jeg hørte dig ikke helt, prøv igen.', transcription: '' });
     }
 
-    // ─── Step 2: AI Coach response ────────────────────────────────────
+    // ─── Step 2: AI Coach response ────────────────────────────────────────
     const kmStr = runContext.km ? `${runContext.km.toFixed(1)} km` : 'ukendt';
     const paceStr = runContext.pace ? `${Math.floor(runContext.pace)}:${String(Math.round((runContext.pace % 1) * 60)).padStart(2, '0')} min/km` : 'ukendt';
     const durationMins = runContext.duration ? Math.floor(runContext.duration / 60) : 0;
@@ -1286,7 +1469,7 @@ Aktuelle løbdata:
 - Tid: ${durationMins} minutter
 
 Regler:
-- Svar KORT (max 2-3 sætninger) — brugeren løber og kan ikke læse lange svar
+- Svar KORT (max 2-3 sætninger) – brugeren løber og kan ikke læse lange svar
 - Vær opmuntrende og positiv
 - Svar på dansk
 - Hvis de spørger om deres tempo/distance, brug de aktuelle data
@@ -1324,16 +1507,17 @@ Regler:
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 // ROOT ENDPOINT
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({ status: 'RunWithAI server kører!', version: '2.8.0-voice-coach' });
+  res.json({ status: 'RunWithAI server kører!', version: '2.9.0-password-reset' });
 });
-// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
 // START SERVER
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`🏃 RunWithAI server kører på port ${PORT}`);
-  console.log(`📦 Version: 2.8.0-voice-coach`);
+  console.log(`📦 Version: 2.9.0-password-reset`);
 });
