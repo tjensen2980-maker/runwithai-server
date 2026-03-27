@@ -225,7 +225,7 @@ app.post('/forgot-password', async (req, res) => {
     if (resend) {
       try {
         await resend.emails.send({
-          from: 'RunWithAI <onboarding@resend.dev>',
+          from: 'RunWithAI <noreply@runwithai.app>',
           to: email,
           subject: 'Nulstil din RunWithAI adgangskode',
           html: `
