@@ -1,5 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SERVER.JS - RunWithAI Backend v2.9.0-password-reset
+// SERVER.JS - RunWithAI Backend v3.0.0-apple-iap
+// Med Apple In-App Purchase support
 // Med delete-account endpoint (Apple App Store krav)
 // Med delete run endpoint
 // Med social challenges & streaks
@@ -474,6 +475,190 @@ app.get('/subscription', authMiddleware, async (req, res) => {
   } catch (err) {
     console.error('Get subscription error:', err);
     res.status(500).json({ error: 'Kunne ikke hente abonnement' });
+  }
+});
+
+// ─── APPLE IAP RECEIPT VALIDATION ───────────────────────────────────────────
+app.post('/validate-receipt', authMiddleware, async (req, res) => {
+  try {
+    const { receipt, productId } = req.body;
+
+    if (!receipt) {
+      return res.status(400).json({ error: 'Receipt påkrævet' });
+    }
+
+    // Validate receipt with Apple
+    const verifyUrl = process.env.NODE_ENV === 'production'
+      ? 'https://buy.itunes.apple.com/verifyReceipt'
+      : 'https://sandbox.itunes.apple.com/verifyReceipt';
+
+    const response = await fetch(verifyUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        'receipt-data': receipt,
+        'password': process.env.APPLE_SHARED_SECRET,
+        'exclude-old-transactions': true,
+      }),
+    });
+
+    const data = await response.json();
+
+    // Status 21007 means sandbox receipt sent to production - retry with sandbox
+    if (data.status === 21007) {
+      const sandboxResponse = await fetch('https://sandbox.itunes.apple.com/verifyReceipt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          'receipt-data': receipt,
+          'password': process.env.APPLE_SHARED_SECRET,
+          'exclude-old-transactions': true,
+        }),
+      });
+      const sandboxData = await sandboxResponse.json();
+      
+      if (sandboxData.status !== 0) {
+        console.error('Apple receipt validation failed (sandbox):', sandboxData.status);
+        return res.status(400).json({ error: 'Ugyldig kvittering', status: sandboxData.status });
+      }
+      
+      // Process sandbox receipt
+      return processAppleReceipt(sandboxData, req.userId, res);
+    }
+
+    if (data.status !== 0) {
+      console.error('Apple receipt validation failed:', data.status);
+      return res.status(400).json({ error: 'Ugyldig kvittering', status: data.status });
+    }
+
+    return processAppleReceipt(data, req.userId, res);
+
+  } catch (err) {
+    console.error('Apple receipt validation error:', err);
+    res.status(500).json({ error: 'Kunne ikke validere køb' });
+  }
+});
+
+async function processAppleReceipt(data, userId, res) {
+  try {
+    const latestReceipt = data.latest_receipt_info;
+    
+    if (!latestReceipt || latestReceipt.length === 0) {
+      return res.status(400).json({ error: 'Ingen aktiv subscription fundet' });
+    }
+
+    // Find the most recent subscription
+    const sortedReceipts = latestReceipt.sort((a, b) => 
+      parseInt(b.expires_date_ms) - parseInt(a.expires_date_ms)
+    );
+    const activeReceipt = sortedReceipts[0];
+
+    const expiresAt = new Date(parseInt(activeReceipt.expires_date_ms));
+    const isActive = expiresAt > new Date();
+
+    if (isActive) {
+      // Update user to Pro
+      await pool.query(`
+        UPDATE users 
+        SET subscription_tier = 'pro',
+            subscription_status = 'active',
+            subscription_ends_at = $1,
+            apple_original_transaction_id = $2
+        WHERE id = $3
+      `, [expiresAt, activeReceipt.original_transaction_id, userId]);
+
+      console.log(`[APPLE IAP] User ${userId} upgraded to Pro, expires: ${expiresAt}`);
+      return res.json({ success: true, tier: 'pro', expiresAt });
+    } else {
+      return res.status(400).json({ error: 'Subscription er udløbet' });
+    }
+  } catch (err) {
+    console.error('Process Apple receipt error:', err);
+    return res.status(500).json({ error: 'Kunne ikke behandle kvittering' });
+  }
+}
+
+// ─── RESTORE APPLE PURCHASES ────────────────────────────────────────────────
+app.post('/restore-purchases', authMiddleware, async (req, res) => {
+  try {
+    const { purchases } = req.body;
+
+    if (!purchases || purchases.length === 0) {
+      return res.json({ success: false, hasActiveSub: false });
+    }
+
+    // Find active subscription among restored purchases
+    let hasActiveSub = false;
+    let latestExpiry = null;
+
+    for (const purchase of purchases) {
+      if (purchase.transactionReceipt) {
+        // Validate each receipt
+        const verifyUrl = process.env.NODE_ENV === 'production'
+          ? 'https://buy.itunes.apple.com/verifyReceipt'
+          : 'https://sandbox.itunes.apple.com/verifyReceipt';
+
+        const response = await fetch(verifyUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            'receipt-data': purchase.transactionReceipt,
+            'password': process.env.APPLE_SHARED_SECRET,
+            'exclude-old-transactions': true,
+          }),
+        });
+
+        let data = await response.json();
+
+        // Retry with sandbox if needed
+        if (data.status === 21007) {
+          const sandboxResponse = await fetch('https://sandbox.itunes.apple.com/verifyReceipt', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              'receipt-data': purchase.transactionReceipt,
+              'password': process.env.APPLE_SHARED_SECRET,
+              'exclude-old-transactions': true,
+            }),
+          });
+          data = await sandboxResponse.json();
+        }
+
+        if (data.status === 0 && data.latest_receipt_info) {
+          const sortedReceipts = data.latest_receipt_info.sort((a, b) => 
+            parseInt(b.expires_date_ms) - parseInt(a.expires_date_ms)
+          );
+          const activeReceipt = sortedReceipts[0];
+          const expiresAt = new Date(parseInt(activeReceipt.expires_date_ms));
+
+          if (expiresAt > new Date()) {
+            hasActiveSub = true;
+            if (!latestExpiry || expiresAt > latestExpiry) {
+              latestExpiry = expiresAt;
+
+              // Update user to Pro
+              await pool.query(`
+                UPDATE users 
+                SET subscription_tier = 'pro',
+                    subscription_status = 'active',
+                    subscription_ends_at = $1,
+                    apple_original_transaction_id = $2
+                WHERE id = $3
+              `, [expiresAt, activeReceipt.original_transaction_id, req.userId]);
+            }
+          }
+        }
+      }
+    }
+
+    if (hasActiveSub) {
+      console.log(`[APPLE IAP] User ${req.userId} restored Pro subscription`);
+    }
+
+    res.json({ success: true, hasActiveSub, expiresAt: latestExpiry });
+  } catch (err) {
+    console.error('Restore purchases error:', err);
+    res.status(500).json({ error: 'Kunne ikke gendanne køb' });
   }
 });
 
