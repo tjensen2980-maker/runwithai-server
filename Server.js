@@ -746,8 +746,8 @@ app.post('/runs', authMiddleware, async (req, res) => {
   try {
     const run = req.body;
     const result = await pool.query(`
-      INSERT INTO runs (user_id, date, km, duration, pace, calories, heart_rate, route, notes, type, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+      INSERT INTO runs (user_id, date, km, duration, pace, calories, heart_rate, route, notes, type, created_at, running_km, walking_km)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11, $12)
       RETURNING *
     `, [
       req.userId,
@@ -759,7 +759,9 @@ app.post('/runs', authMiddleware, async (req, res) => {
       run.heart_rate,
       run.route ? JSON.stringify(run.route) : null,
       run.notes,
-      run.type || 'run'
+      run.type || 'run',
+      run.running_km || null,
+      run.walking_km || null
     ]);
 
     const savedRun = result.rows[0];
