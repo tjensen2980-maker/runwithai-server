@@ -579,34 +579,35 @@ async function processAppleReceipt(data, userId, res) {
 }
 
 // ─── RESTORE APPLE PURCHASES ────────────────────────────────────────────────
-app.post('/restore-purchases', authMiddleware, async (req, res) => {
+// ─── ACTIVATE SUBSCRIPTION (fra RevenueCat) ─────────────────────────────────
+app.post('/subscription/activate', authMiddleware, async (req, res) => {
   try {
-    const { purchases } = req.body;
+    const { revenueCatId } = req.body;
+    const userId = req.userId;
 
-    if (!purchases || purchases.length === 0) {
-      return res.json({ success: false, hasActiveSub: false });
-    }
+    console.log(`[RevenueCat] Activating subscription for user ${userId}, RC ID: ${revenueCatId}`);
 
-    // Find active subscription among restored purchases
-    let hasActiveSub = false;
-    let latestExpiry = null;
+    // Opdater bruger til Pro
+    await pool.query(`
+      UPDATE users 
+      SET subscription_tier = 'pro',
+          subscription_status = 'active',
+          revenuecat_id = $1
+      WHERE id = $2
+    `, [revenueCatId || null, userId]);
 
-    for (const purchase of purchases) {
-      if (purchase.transactionReceipt) {
-        // Validate each receipt
-        const verifyUrl = process.env.NODE_ENV === 'production'
-          ? 'https://buy.itunes.apple.com/verifyReceipt'
-          : 'https://sandbox.itunes.apple.com/verifyReceipt';
+    console.log(`[RevenueCat] User ${userId} upgraded to Pro`);
 
-        const response = await fetch(verifyUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            'receipt-data': purchase.transactionReceipt,
-            'password': process.env.APPLE_SHARED_SECRET,
-            'exclude-old-transactions': true,
-          }),
-        });
+    res.json({ 
+      success: true, 
+      tier: 'pro',
+      message: 'Subscription aktiveret'
+    });
+  } catch (err) {
+    console.error('Subscription activate error:', err);
+    res.status(500).json({ error: 'Kunne ikke aktivere subscription' });
+  }
+});
 
         let data = await response.json();
 
