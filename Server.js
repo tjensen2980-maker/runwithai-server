@@ -1,6 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// SERVER.JS - RunWithAI Backend v3.0.0-apple-iap
+// SERVER.JS - RunWithAI Backend v3.0.1-revenuecat
 // Med Apple In-App Purchase support
+// Med RevenueCat subscription activate endpoint
 // Med delete-account endpoint (Apple App Store krav)
 // Med delete run endpoint
 // Med social challenges & streaks
@@ -478,6 +479,36 @@ app.get('/subscription', authMiddleware, async (req, res) => {
   }
 });
 
+// ─── ACTIVATE SUBSCRIPTION (fra RevenueCat) ─────────────────────────────────
+app.post('/subscription/activate', authMiddleware, async (req, res) => {
+  try {
+    const { revenueCatId } = req.body;
+    const userId = req.userId;
+
+    console.log(`[RevenueCat] Activating subscription for user ${userId}, RC ID: ${revenueCatId}`);
+
+    // Opdater bruger til Pro
+    await pool.query(`
+      UPDATE users 
+      SET subscription_tier = 'pro',
+          subscription_status = 'active',
+          revenuecat_id = $1
+      WHERE id = $2
+    `, [revenueCatId || null, userId]);
+
+    console.log(`[RevenueCat] User ${userId} upgraded to Pro`);
+
+    res.json({ 
+      success: true, 
+      tier: 'pro',
+      message: 'Subscription aktiveret'
+    });
+  } catch (err) {
+    console.error('Subscription activate error:', err);
+    res.status(500).json({ error: 'Kunne ikke aktivere subscription' });
+  }
+});
+
 // ─── APPLE IAP RECEIPT VALIDATION ───────────────────────────────────────────
 app.post('/validate-receipt', authMiddleware, async (req, res) => {
   try {
@@ -579,35 +610,34 @@ async function processAppleReceipt(data, userId, res) {
 }
 
 // ─── RESTORE APPLE PURCHASES ────────────────────────────────────────────────
-// ─── ACTIVATE SUBSCRIPTION (fra RevenueCat) ─────────────────────────────────
-app.post('/subscription/activate', authMiddleware, async (req, res) => {
+app.post('/restore-purchases', authMiddleware, async (req, res) => {
   try {
-    const { revenueCatId } = req.body;
-    const userId = req.userId;
+    const { purchases } = req.body;
 
-    console.log(`[RevenueCat] Activating subscription for user ${userId}, RC ID: ${revenueCatId}`);
+    if (!purchases || purchases.length === 0) {
+      return res.json({ success: false, hasActiveSub: false });
+    }
 
-    // Opdater bruger til Pro
-    await pool.query(`
-      UPDATE users 
-      SET subscription_tier = 'pro',
-          subscription_status = 'active',
-          revenuecat_id = $1
-      WHERE id = $2
-    `, [revenueCatId || null, userId]);
+    // Find active subscription among restored purchases
+    let hasActiveSub = false;
+    let latestExpiry = null;
 
-    console.log(`[RevenueCat] User ${userId} upgraded to Pro`);
+    for (const purchase of purchases) {
+      if (purchase.transactionReceipt) {
+        // Validate each receipt
+        const verifyUrl = process.env.NODE_ENV === 'production'
+          ? 'https://buy.itunes.apple.com/verifyReceipt'
+          : 'https://sandbox.itunes.apple.com/verifyReceipt';
 
-    res.json({ 
-      success: true, 
-      tier: 'pro',
-      message: 'Subscription aktiveret'
-    });
-  } catch (err) {
-    console.error('Subscription activate error:', err);
-    res.status(500).json({ error: 'Kunne ikke aktivere subscription' });
-  }
-});
+        const response = await fetch(verifyUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            'receipt-data': purchase.transactionReceipt,
+            'password': process.env.APPLE_SHARED_SECRET,
+            'exclude-old-transactions': true,
+          }),
+        });
 
         let data = await response.json();
 
@@ -1697,7 +1727,7 @@ Regler:
 // ROOT ENDPOINT
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
-  res.json({ status: 'RunWithAI server kører!', version: '2.9.0-password-reset' });
+  res.json({ status: 'RunWithAI server kører!', version: '3.0.1-revenuecat' });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1705,5 +1735,5 @@ app.get('/', (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.listen(PORT, () => {
   console.log(`🏃 RunWithAI server kører på port ${PORT}`);
-  console.log(`📦 Version: 2.9.0-password-reset`);
+  console.log(`📦 Version: 3.0.1-revenuecat`);
 });
