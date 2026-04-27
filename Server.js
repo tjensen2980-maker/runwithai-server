@@ -777,8 +777,8 @@ app.post('/runs', authMiddleware, async (req, res) => {
   try {
     const run = req.body;
     const result = await pool.query(`
-      INSERT INTO runs (user_id, date, km, duration, pace, calories, heart_rate, route, notes, type, created_at, running_km, walking_km)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11, $12)
+      INSERT INTO runs (user_id, date, km, duration, pace, calories, heart_rate, route, notes, type, created_at, running_km, walking_km, max_hr, cadence, total_ascent, total_descent, total_steps, splits, hr_samples)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11, $12, $13, $14, $15, $16, $17, $18, $19)
       RETURNING *
     `, [
       req.userId,
@@ -792,7 +792,14 @@ app.post('/runs', authMiddleware, async (req, res) => {
       run.notes,
       run.type || 'run',
       run.running_km || null,
-      run.walking_km || null
+      run.walking_km || null,
+      run.max_hr || null,
+      run.cadence || null,
+      run.total_ascent || null,
+      run.total_descent || null,
+      run.total_steps || null,
+      run.splits ? (typeof run.splits === "string" ? run.splits : JSON.stringify(run.splits)) : null,
+      run.hr_samples ? (typeof run.hr_samples === "string" ? run.hr_samples : JSON.stringify(run.hr_samples)) : null
     ]);
 
     const savedRun = result.rows[0];
