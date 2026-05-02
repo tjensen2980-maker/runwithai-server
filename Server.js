@@ -2095,6 +2095,70 @@ app.get('/foods/barcode/:ean', authMiddleware, async (req, res) => {
   }
 });
 
+// POST /foods/analyze-photo - AI-analyse af madbillede via Claude Vision
+app.post('/foods/analyze-photo', authMiddleware, async (req, res) => {
+  try {
+    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(500).json({ error: 'AI ikke konfigureret' });
+    }
+
+    const { image_base64, image_media_type } = req.body;
+    if (!image_base64) {
+      return res.status(400).json({ error: 'image_base64 er paakraevet' });
+    }
+
+    const mediaType = image_media_type || 'image/jpeg';
+
+    const systemPrompt = 'Du er en ernaeringsekspert der analyserer madbilleder. Returner ALTID kun gyldig JSON uden markdown eller forklaring. JSON skal have feltet "items" som er en array af objekter med felterne: name (dansk navn), estimated_grams (tal), kcal_per_100g (tal), protein_g (per 100g, tal), carbs_g (per 100g, tal), fat_g (per 100g, tal), confidence (0-1). Estimer maengder ud fra hvad du ser paa tallerkenen/glasset.';
+
+    const userPrompt = 'Analyser dette billede og identificer alle madvarer. Returner kun JSON.';
+
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1500,
+        system: systemPrompt,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: image_base64 } },
+            { type: 'text', text: userPrompt }
+          ]
+        }],
+      }),
+    });
+
+    const data = await anthropicRes.json();
+    if (!anthropicRes.ok) {
+      console.error('Anthropic vision error:', data);
+      return res.status(anthropicRes.status).json({ error: 'AI fejl', details: data });
+    }
+
+    const textBlock = (data.content || []).find(b => b.type === 'text');
+    const rawText = textBlock ? textBlock.text : '';
+
+    let parsed;
+    try {
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { items: [] };
+    } catch (e) {
+      console.error('JSON parse error:', e, 'Raw:', rawText);
+      return res.status(500).json({ error: 'AI svar kunne ikke parses', raw: rawText });
+    }
+
+    res.json({ items: parsed.items || [], raw: rawText });
+  } catch (err) {
+    console.error('analyze-photo error:', err);
+    res.status(500).json({ error: 'Foto-analyse fejlede' });
+  }
+});
 // POST /foods/custom - Opret egen mad (custom food)
 app.post('/foods/custom', authMiddleware, async (req, res) => {
   try {
