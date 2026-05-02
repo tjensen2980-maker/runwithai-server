@@ -1863,15 +1863,16 @@ app.put('/goals', authMiddleware, async (req, res) => {
     if (g.primary_goal && !validGoals.includes(g.primary_goal)) {
       return res.status(400).json({ error: 'Ugyldigt mÃ¥l' });
     }
-
     const result = await pool.query(
-      'INSERT INTO user_goals (user_id, primary_goal, target_weight_kg, target_kcal, target_protein_g, weekly_run_km, weekly_strength_sessions, race_date, race_distance_km, updated_at) ' +
-      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW()) ' +
+      'INSERT INTO user_goals (user_id, primary_goal, target_weight_kg, target_kcal, target_protein_g, target_carbs_g, target_fat_g, weekly_run_km, weekly_strength_sessions, race_date, race_distance_km, updated_at) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()) ' +
       'ON CONFLICT (user_id) DO UPDATE SET ' +
       '  primary_goal = EXCLUDED.primary_goal, ' +
       '  target_weight_kg = EXCLUDED.target_weight_kg, ' +
       '  target_kcal = EXCLUDED.target_kcal, ' +
       '  target_protein_g = EXCLUDED.target_protein_g, ' +
+      '  target_carbs_g = EXCLUDED.target_carbs_g, ' +
+      '  target_fat_g = EXCLUDED.target_fat_g, ' +
       '  weekly_run_km = EXCLUDED.weekly_run_km, ' +
       '  weekly_strength_sessions = EXCLUDED.weekly_strength_sessions, ' +
       '  race_date = EXCLUDED.race_date, ' +
@@ -1884,6 +1885,8 @@ app.put('/goals', authMiddleware, async (req, res) => {
         g.target_weight_kg || null,
         g.target_kcal || null,
         g.target_protein_g || null,
+        g.target_carbs_g || null,
+        g.target_fat_g || null,
         g.weekly_run_km || null,
         g.weekly_strength_sessions || null,
         g.race_date || null,
