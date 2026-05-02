@@ -1896,6 +1896,281 @@ app.put('/goals', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke gemme mÃ¥l' });
   }
 });
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// NUTRITION ENDPOINTS (v2 - meals, foods, daily summary)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+// â”€â”€â”€ MEALS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// GET /meals?date=YYYY-MM-DD - Hent mÃ¥ltider for en bestemt dag (default: i dag)
+app.get('/meals', authMiddleware, async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+
+    const result = await pool.query(
+      'SELECT m.*, ' +
+      '  COALESCE(json_agg(json_build_object(' +
+      '    \'id\', mi.id, \'food_id\', mi.food_id, \'amount_g\', mi.amount_g, ' +
+      '    \'kcal\', mi.kcal, \'protein_g\', mi.protein_g, \'carbs_g\', mi.carbs_g, \'fat_g\', mi.fat_g, ' +
+      '    \'food_name\', f.name, \'food_brand\', f.brand' +
+      '  )) FILTER (WHERE mi.id IS NOT NULL), \'[]\') AS items ' +
+      'FROM meals m ' +
+      'LEFT JOIN meal_items mi ON mi.meal_id = m.id ' +
+      'LEFT JOIN foods f ON f.id = mi.food_id ' +
+      'WHERE m.user_id = $1 AND DATE(m.eaten_at) = $2 ' +
+      'GROUP BY m.id ' +
+      'ORDER BY m.eaten_at ASC',
+      [req.userId, date]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get meals error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente mÃ¥ltider' });
+  }
+});
+
+// POST /meals - Log et nyt mÃ¥ltid med items
+// Body: { eaten_at, meal_type, notes, items: [{ food_id?, amount_g, kcal, protein_g, carbs_g, fat_g }] }
+app.post('/meals', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const m = req.body;
+
+    if (!m.eaten_at) {
+      return res.status(400).json({ error: 'eaten_at er pÃ¥krÃ¦vet' });
+    }
+    if (!Array.isArray(m.items) || m.items.length === 0) {
+      return res.status(400).json({ error: 'items er pÃ¥krÃ¦vet (mindst Ã©t item)' });
+    }
+
+    const validTypes = ['breakfast', 'lunch', 'dinner', 'snack'];
+    if (m.meal_type && !validTypes.includes(m.meal_type)) {
+      return res.status(400).json({ error: 'Ugyldig meal_type' });
+    }
+
+    await client.query('BEGIN');
+
+    const mealResult = await client.query(
+      'INSERT INTO meals (user_id, eaten_at, meal_type, notes, photo_url) ' +
+      'VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [req.userId, m.eaten_at, m.meal_type || null, m.notes || null, m.photo_url || null]
+    );
+    const meal = mealResult.rows[0];
+
+    const insertedItems = [];
+    for (const item of m.items) {
+      if (!item.amount_g || item.kcal === undefined) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Hvert item skal have amount_g og kcal' });
+      }
+      const itemResult = await client.query(
+        'INSERT INTO meal_items (meal_id, food_id, amount_g, kcal, protein_g, carbs_g, fat_g) ' +
+        'VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+        [
+          meal.id,
+          item.food_id || null,
+          item.amount_g,
+          item.kcal,
+          item.protein_g || 0,
+          item.carbs_g || 0,
+          item.fat_g || 0
+        ]
+      );
+      insertedItems.push(itemResult.rows[0]);
+    }
+
+    await client.query('COMMIT');
+    meal.items = insertedItems;
+    res.json(meal);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Create meal error:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme mÃ¥ltid' });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /meals/:id - Slet et mÃ¥ltid (kun eget)
+app.delete('/meals/:id', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM meals WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'MÃ¥ltid ikke fundet' });
+    }
+    res.json({ success: true, id: result.rows[0].id });
+  } catch (err) {
+    console.error('Delete meal error:', err);
+    res.status(500).json({ error: 'Kunne ikke slette mÃ¥ltid' });
+  }
+});
+
+// â”€â”€â”€ FOODS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// GET /foods/search?q=... - SÃ¸g i food database (lokal cache)
+app.get('/foods/search', authMiddleware, async (req, res) => {
+  try {
+    const q = (req.query.q || '').trim();
+    if (q.length < 2) {
+      return res.json([]);
+    }
+    const result = await pool.query(
+      'SELECT * FROM foods WHERE LOWER(name) LIKE $1 OR LOWER(brand) LIKE $1 ORDER BY is_verified DESC, name ASC LIMIT 50',
+      ['%' + q.toLowerCase() + '%']
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Search foods error:', err);
+    res.status(500).json({ error: 'Kunne ikke sÃ¸ge i fÃ¸devarer' });
+  }
+});
+
+// GET /foods/barcode/:ean - SlÃ¥ produkt op via stregkode (Open Food Facts)
+app.get('/foods/barcode/:ean', authMiddleware, async (req, res) => {
+  try {
+    const ean = req.params.ean.replace(/[^0-9]/g, '');
+    if (ean.length < 8) {
+      return res.status(400).json({ error: 'Ugyldig stregkode' });
+    }
+
+    // Tjek fÃ¸rst lokal cache
+    const cached = await pool.query(
+      "SELECT * FROM foods WHERE source = 'openfoodfacts' AND source_id = $1",
+      [ean]
+    );
+    if (cached.rows.length > 0) {
+      return res.json(cached.rows[0]);
+    }
+
+    // Hent fra Open Food Facts
+    const off = await fetch('https://world.openfoodfacts.org/api/v2/product/' + ean + '.json');
+    if (!off.ok) {
+      return res.status(404).json({ error: 'Produkt ikke fundet' });
+    }
+    const data = await off.json();
+    if (data.status !== 1 || !data.product) {
+      return res.status(404).json({ error: 'Produkt ikke fundet' });
+    }
+
+    const p = data.product;
+    const nutriments = p.nutriments || {};
+
+    if (nutriments['energy-kcal_100g'] === undefined) {
+      return res.status(404).json({ error: 'ErnÃ¦ringsdata mangler for dette produkt' });
+    }
+
+    // Cache i vores database
+    const inserted = await pool.query(
+      'INSERT INTO foods (source, source_id, name, brand, serving_size_g, kcal_per_100g, protein_g, carbs_g, fat_g, fiber_g, is_verified) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ' +
+      'ON CONFLICT (source, source_id) DO UPDATE SET ' +
+      '  name = EXCLUDED.name, brand = EXCLUDED.brand, kcal_per_100g = EXCLUDED.kcal_per_100g ' +
+      'RETURNING *',
+      [
+        'openfoodfacts',
+        ean,
+        p.product_name || p.generic_name || 'Ukendt produkt',
+        p.brands || null,
+        p.serving_quantity ? parseFloat(p.serving_quantity) : null,
+        nutriments['energy-kcal_100g'] || 0,
+        nutriments.proteins_100g || 0,
+        nutriments.carbohydrates_100g || 0,
+        nutriments.fat_100g || 0,
+        nutriments.fiber_100g || null,
+        false
+      ]
+    );
+
+    res.json(inserted.rows[0]);
+  } catch (err) {
+    console.error('Barcode lookup error:', err);
+    res.status(500).json({ error: 'Kunne ikke slÃ¥ stregkode op' });
+  }
+});
+
+// POST /foods/custom - Opret egen mad (custom food)
+app.post('/foods/custom', authMiddleware, async (req, res) => {
+  try {
+    const f = req.body;
+    if (!f.name || f.kcal_per_100g === undefined) {
+      return res.status(400).json({ error: 'name og kcal_per_100g er pÃ¥krÃ¦vet' });
+    }
+    const result = await pool.query(
+      'INSERT INTO foods (source, source_id, name, brand, serving_size_g, kcal_per_100g, protein_g, carbs_g, fat_g, fiber_g, is_verified) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false) RETURNING *',
+      [
+        'custom',
+        'user_' + req.userId + '_' + Date.now(),
+        f.name,
+        f.brand || null,
+        f.serving_size_g || null,
+        f.kcal_per_100g,
+        f.protein_g || 0,
+        f.carbs_g || 0,
+        f.fat_g || 0,
+        f.fiber_g || null
+      ]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Create custom food error:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme fÃ¸devare' });
+  }
+});
+
+// â”€â”€â”€ DAILY SUMMARY â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// GET /daily-summary?date=YYYY-MM-DD - Hent dagens kalorie-balance
+app.get('/daily-summary', authMiddleware, async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+
+    // Beregn kalorie-ind fra meals
+    const kcalIn = await pool.query(
+      'SELECT COALESCE(SUM(mi.kcal), 0) AS total, ' +
+      '  COALESCE(SUM(mi.protein_g), 0) AS protein, ' +
+      '  COALESCE(SUM(mi.carbs_g), 0) AS carbs, ' +
+      '  COALESCE(SUM(mi.fat_g), 0) AS fat ' +
+      'FROM meals m JOIN meal_items mi ON mi.meal_id = m.id ' +
+      'WHERE m.user_id = $1 AND DATE(m.eaten_at) = $2',
+      [req.userId, date]
+    );
+
+    // Beregn kalorie-ud fra activities
+    const kcalOut = await pool.query(
+      "SELECT COALESCE(SUM(calories_kcal), 0) AS total " +
+      "FROM activities WHERE user_id = $1 AND DATE(started_at) = $2",
+      [req.userId, date]
+    );
+
+    // Hent brugerens mÃ¥l (for at vise "tilbage til mÃ¥l")
+    const goals = await pool.query(
+      'SELECT target_kcal, target_protein_g FROM user_goals WHERE user_id = $1',
+      [req.userId]
+    );
+
+    const target = goals.rows[0] || { target_kcal: null, target_protein_g: null };
+
+    res.json({
+      date: date,
+      kcal_in: parseInt(kcalIn.rows[0].total, 10),
+      kcal_out_activity: parseInt(kcalOut.rows[0].total, 10),
+      protein_g: parseFloat(kcalIn.rows[0].protein),
+      carbs_g: parseFloat(kcalIn.rows[0].carbs),
+      fat_g: parseFloat(kcalIn.rows[0].fat),
+      target_kcal: target.target_kcal,
+      target_protein_g: target.target_protein_g,
+      kcal_remaining: target.target_kcal ? (target.target_kcal - parseInt(kcalIn.rows[0].total, 10) + parseInt(kcalOut.rows[0].total, 10)) : null
+    });
+  } catch (err) {
+    console.error('Daily summary error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente dagsoversigt' });
+  }
+});
 app.listen(PORT, () => {
   console.log(`ðŸƒ RunWithAI server kÃ¸rer pÃ¥ port ${PORT}`);
   console.log(`ðŸ“¦ Version: 3.0.1-revenuecat`);
