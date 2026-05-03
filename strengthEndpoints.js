@@ -72,8 +72,12 @@ function registerStrengthEndpoints(app, pool, authMiddleware) {
         totalVolume += reps * wt;
       });
 
+      const totalSets = sets.length;
+      const intensityFactor = 0.7 + (rpe / 14);
+      const setBased = Math.round(totalSets * 8 * intensityFactor);
       const met = 5.0 * (0.5 + (rpe / 10));
-      const totalCalories = Math.round(met * userWeightKg * (durationMin / 60));
+      const timeBased = Math.round(met * userWeightKg * (durationMin / 60));
+      const totalCalories = Math.max(setBased, timeBased);
 
       await client.query('BEGIN');
 
