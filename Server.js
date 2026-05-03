@@ -2189,6 +2189,192 @@ app.post('/foods/custom', authMiddleware, async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LIFESUM-STYLE CALORIE CALCULATION (BMR + TDEE + målbaseret justering)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Aktivitetsfaktorer (matcher Lifesum's 5 niveauer)
+const ACTIVITY_FACTORS = {
+  sedentary:   1.2,
+  light:       1.375,
+  moderate:    1.55,
+  active:      1.725,
+  very_active: 1.9,
+};
+
+// Justering pr. mål og takt (kcal/dag i forhold til vedligehold)
+const GOAL_ADJUSTMENTS = {
+  lose_fat:    { slow: -250, normal: -500, fast: -750 },
+  maintain:    { slow:    0, normal:    0, fast:    0 },
+  gain_muscle: { slow: +250, normal: +400, fast: +500 },
+};
+
+// Makro-fordelinger (% af kcal: protein / kulhydrat / fedt)
+const MACRO_PLANS = {
+  balanced:     { protein: 0.25, carbs: 0.50, fat: 0.25 },
+  high_protein: { protein: 0.35, carbs: 0.40, fat: 0.25 },
+  low_carb:     { protein: 0.30, carbs: 0.25, fat: 0.45 },
+  keto:         { protein: 0.25, carbs: 0.05, fat: 0.70 },
+};
+
+// Mifflin-St Jeor BMR
+function calculateBMR({ weight_kg, height_cm, age, gender }) {
+  if (!weight_kg || !height_cm || !age || !gender) return null;
+  const base = 10 * weight_kg + 6.25 * height_cm - 5 * age;
+  return gender === 'female' ? base - 161 : base + 5;
+}
+
+// Beregn TDEE og daglige kcal/makro-mål
+function calculateTargets(input) {
+  const {
+    weight_kg, height_cm, age, gender,
+    activity_level, primary_goal, goal_pace, plan_type, target_weight_kg
+  } = input || {};
+
+  const bmr = calculateBMR({ weight_kg, height_cm, age, gender });
+  if (!bmr) return null;
+
+  const factor = ACTIVITY_FACTORS[activity_level] || ACTIVITY_FACTORS.moderate;
+  const tdee = Math.round(bmr * factor);
+
+  let goal = primary_goal || 'maintain';
+  if (target_weight_kg && weight_kg) {
+    if (target_weight_kg < weight_kg - 1) goal = 'lose_fat';
+    else if (target_weight_kg > weight_kg + 1) goal = 'gain_muscle';
+    else goal = 'maintain';
+  }
+
+  const pace = goal_pace || 'normal';
+  const adjust = (GOAL_ADJUSTMENTS[goal] && GOAL_ADJUSTMENTS[goal][pace]) || 0;
+
+  const minKcal = gender === 'female' ? 1200 : 1500;
+  const targetKcal = Math.max(minKcal, tdee + adjust);
+
+  const plan = MACRO_PLANS[plan_type] || MACRO_PLANS.balanced;
+  const proteinG = Math.round((targetKcal * plan.protein) / 4);
+  const carbsG   = Math.round((targetKcal * plan.carbs)   / 4);
+  const fatG     = Math.round((targetKcal * plan.fat)     / 9);
+
+  return {
+    bmr_kcal: Math.round(bmr),
+    tdee_kcal: tdee,
+    target_kcal: targetKcal,
+    target_protein_g: proteinG,
+    target_carbs_g: carbsG,
+    target_fat_g: fatG,
+    primary_goal: goal,
+    goal_pace: pace,
+    plan_type: plan_type || 'balanced',
+    activity_level: activity_level || 'moderate',
+  };
+}
+
+// ─── POST /goals/calculate - preview uden at gemme ────────────────────────
+app.post('/goals/calculate', authMiddleware, async (req, res) => {
+  try {
+    const result = calculateTargets(req.body || {});
+    if (!result) {
+      return res.status(400).json({ error: 'Mangler vægt, højde, alder eller køn' });
+    }
+    res.json(result);
+  } catch (err) {
+    console.error('Calculate goals error:', err);
+    res.status(500).json({ error: 'Kunne ikke beregne mål' });
+  }
+});
+
+// ─── POST /goals/auto - beregn fra profil + gem ───────────────────────────
+app.post('/goals/auto', authMiddleware, async (req, res) => {
+  try {
+    const profileResult = await pool.query(
+      'SELECT data FROM profile WHERE user_id = $1',
+      [req.userId]
+    );
+    if (profileResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Profil mangler — udfyld vægt, højde, alder og køn først' });
+    }
+    let p = profileResult.rows[0].data;
+    if (typeof p === 'string') { try { p = JSON.parse(p); } catch (e) {} }
+    p = p || {};
+
+    const existingResult = await pool.query(
+      'SELECT * FROM user_goals WHERE user_id = $1',
+      [req.userId]
+    );
+    const existing = existingResult.rows[0] || {};
+
+    const input = {
+      weight_kg: p.weight_kg || p.weight,
+      height_cm: p.height_cm || p.height,
+      age: p.age,
+      gender: p.gender,
+      activity_level: req.body.activity_level || existing.activity_level || p.activity_level,
+      primary_goal: req.body.primary_goal || existing.primary_goal,
+      goal_pace: req.body.goal_pace || existing.goal_pace,
+      plan_type: req.body.plan_type || existing.plan_type,
+      target_weight_kg: req.body.target_weight_kg || existing.target_weight_kg,
+    };
+
+    const calc = calculateTargets(input);
+    if (!calc) {
+      return res.status(400).json({
+        error: 'Profil mangler oplysninger',
+        required: ['weight_kg', 'height_cm', 'age', 'gender'],
+        have: {
+          weight_kg: !!input.weight_kg,
+          height_cm: !!input.height_cm,
+          age: !!input.age,
+          gender: !!input.gender,
+        },
+      });
+    }
+
+    const result = await pool.query(
+      'INSERT INTO user_goals (user_id, primary_goal, target_weight_kg, target_kcal, target_protein_g, target_carbs_g, target_fat_g, plan_type, goal_pace, bmr_kcal, tdee_kcal, calculated_at, updated_at) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW()) ' +
+      'ON CONFLICT (user_id) DO UPDATE SET ' +
+      '  primary_goal = EXCLUDED.primary_goal, ' +
+      '  target_weight_kg = EXCLUDED.target_weight_kg, ' +
+      '  target_kcal = EXCLUDED.target_kcal, ' +
+      '  target_protein_g = EXCLUDED.target_protein_g, ' +
+      '  target_carbs_g = EXCLUDED.target_carbs_g, ' +
+      '  target_fat_g = EXCLUDED.target_fat_g, ' +
+      '  plan_type = EXCLUDED.plan_type, ' +
+      '  goal_pace = EXCLUDED.goal_pace, ' +
+      '  bmr_kcal = EXCLUDED.bmr_kcal, ' +
+      '  tdee_kcal = EXCLUDED.tdee_kcal, ' +
+      '  calculated_at = NOW(), ' +
+      '  updated_at = NOW() ' +
+      'RETURNING *',
+      [
+        req.userId,
+        calc.primary_goal,
+        input.target_weight_kg || null,
+        calc.target_kcal,
+        calc.target_protein_g,
+        calc.target_carbs_g,
+        calc.target_fat_g,
+        calc.plan_type,
+        calc.goal_pace,
+        calc.bmr_kcal,
+        calc.tdee_kcal,
+      ]
+    );
+
+    res.json({
+      ...result.rows[0],
+      calculation: {
+        bmr_kcal: calc.bmr_kcal,
+        tdee_kcal: calc.tdee_kcal,
+        activity_level: calc.activity_level,
+      },
+    });
+  } catch (err) {
+    console.error('Auto-calculate goals error:', err);
+    res.status(500).json({ error: 'Kunne ikke beregne mål' });
+  }
+});
+
 // â”€â”€â”€ DAILY SUMMARY â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // GET /daily-summary?date=YYYY-MM-DD - Hent dagens kalorie-balance
