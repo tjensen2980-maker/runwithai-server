@@ -1,11 +1,12 @@
 // ============================================
 // STRENGTH ENDPOINTS
 // Mounted from Server.js via registerStrengthEndpoints(app, pool, authMiddleware)
+// Uses existing set_nr column in strength_sets
 // ============================================
 
 function registerStrengthEndpoints(app, pool, authMiddleware) {
 
-  // GET /strength-sessions - list user's strength sessions with sets
+  // GET /strength-sessions
   app.get('/strength-sessions', authMiddleware, async function (req, res) {
     try {
       const userId = req.userId;
@@ -24,12 +25,12 @@ function registerStrengthEndpoints(app, pool, authMiddleware) {
       const sessionIds = sessions.map(function (s) { return s.id; });
 
       const setsResult = await pool.query(
-        'SELECT s.id, s.session_id, s.exercise_id, s.set_number, s.reps, s.weight_kg, s.rpe, s.created_at, ' +
+        'SELECT s.id, s.session_id, s.exercise_id, s.set_nr AS set_number, s.reps, s.weight_kg, s.rpe, s.created_at, ' +
         'e.name AS exercise_name, e.muscle_groups, e.category ' +
         'FROM strength_sets s ' +
         'LEFT JOIN exercises e ON e.id = s.exercise_id ' +
         'WHERE s.session_id = ANY($1::int[]) ' +
-        'ORDER BY s.session_id, s.set_number',
+        'ORDER BY s.session_id, s.set_nr',
         [sessionIds]
       );
 
@@ -50,7 +51,7 @@ function registerStrengthEndpoints(app, pool, authMiddleware) {
     }
   });
 
-  // POST /strength-sessions - create a new strength session with sets
+  // POST /strength-sessions
   app.post('/strength-sessions', authMiddleware, async function (req, res) {
     const client = await pool.connect();
     try {
@@ -86,7 +87,7 @@ function registerStrengthEndpoints(app, pool, authMiddleware) {
       for (let i = 0; i < sets.length; i++) {
         const s = sets[i];
         await client.query(
-          'INSERT INTO strength_sets (session_id, exercise_id, set_number, reps, weight_kg, rpe) ' +
+          'INSERT INTO strength_sets (session_id, exercise_id, set_nr, reps, weight_kg, rpe) ' +
           'VALUES ($1, $2, $3, $4, $5, $6)',
           [
             session.id,
@@ -99,7 +100,7 @@ function registerStrengthEndpoints(app, pool, authMiddleware) {
         );
       }
 
-      // Mirror to activities so kcal counts toward daily goal
+      // Mirror to activities table so kcal counts in daily summary
       try {
         await client.query(
           'INSERT INTO activities (user_id, type, started_at, duration_sec, calories_kcal, notes, source) ' +
@@ -134,19 +135,19 @@ function registerStrengthEndpoints(app, pool, authMiddleware) {
     }
   });
 
-  // GET /exercises/:id/last - last performance for "last time" display
+  // GET /exercises/:id/last
   app.get('/exercises/:id/last', authMiddleware, async function (req, res) {
     try {
       const userId = req.userId;
       const exerciseId = req.params.id;
 
       const result = await pool.query(
-        'SELECT s.id, s.session_id, s.set_number, s.reps, s.weight_kg, s.rpe, s.created_at, ' +
+        'SELECT s.id, s.session_id, s.set_nr AS set_number, s.reps, s.weight_kg, s.rpe, s.created_at, ' +
         'ses.started_at ' +
         'FROM strength_sets s ' +
         'JOIN strength_sessions ses ON ses.id = s.session_id ' +
         'WHERE ses.user_id = $1 AND s.exercise_id = $2 ' +
-        'ORDER BY ses.started_at DESC, s.set_number ASC ' +
+        'ORDER BY ses.started_at DESC, s.set_nr ASC ' +
         'LIMIT 20',
         [userId, exerciseId]
       );
