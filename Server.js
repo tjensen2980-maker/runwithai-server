@@ -17,6 +17,7 @@ const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const Stripe = require('stripe');
 const multer = require('multer');
+const { registerStrengthEndpoints } = require('./strengthEndpoints');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -2446,6 +2447,8 @@ app.get('/daily-summary', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke hente dagsoversigt' });
   }
 });
+
+registerStrengthEndpoints(app, pool, authMiddleware);
 app.listen(PORT, () => {
   console.log(`ðŸƒ RunWithAI server kÃ¸rer pÃ¥ port ${PORT}`);
   console.log(`ðŸ“¦ Version: 3.0.1-revenuecat`);
