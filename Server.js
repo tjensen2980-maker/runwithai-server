@@ -2375,14 +2375,13 @@ app.post('/goals/auto', authMiddleware, async (req, res) => {
   }
 });
 
-// â”€â”€â”€ DAILY SUMMARY â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
+// ─── DAILY SUMMARY ──────────────────────────────────────────────────────
 // GET /daily-summary?date=YYYY-MM-DD - Hent dagens kalorie-balance
 app.get('/daily-summary', authMiddleware, async (req, res) => {
   try {
     const date = req.query.date || new Date().toISOString().split('T')[0];
 
-    // Beregn kalorie-ind fra meals
+    // Kalorier IND fra meals
     const kcalIn = await pool.query(
       'SELECT COALESCE(SUM(mi.kcal), 0) AS total, ' +
       '  COALESCE(SUM(mi.protein_g), 0) AS protein, ' +
@@ -2393,31 +2392,54 @@ app.get('/daily-summary', authMiddleware, async (req, res) => {
       [req.userId, date]
     );
 
-    // Beregn kalorie-ud fra activities
-    const kcalOut = await pool.query(
+    // Kalorier UD fra activities-tabellen
+    const kcalOutActivities = await pool.query(
       "SELECT COALESCE(SUM(calories_kcal), 0) AS total " +
       "FROM activities WHERE user_id = $1 AND DATE(started_at) = $2",
       [req.userId, date]
     );
 
-    // Hent brugerens mÃ¥l (for at vise "tilbage til mÃ¥l")
-    const goals = await pool.query(
-      'SELECT target_kcal, target_protein_g FROM user_goals WHERE user_id = $1',
-      [req.userId]
+    // Kalorier UD fra runs-tabellen (NYT — det her var bug'en)
+    const kcalOutRuns = await pool.query(
+      "SELECT COALESCE(SUM(calories), 0) AS total " +
+      "FROM runs WHERE user_id = $1 AND DATE(date) = $2",
+      [req.userId, date]
     );
 
-    const target = goals.rows[0] || { target_kcal: null, target_protein_g: null };
+    const kcalOutTotal =
+      parseInt(kcalOutActivities.rows[0].total, 10) +
+      parseInt(kcalOutRuns.rows[0].total, 10);
+
+    // Hent brugerens mål (inkl. carbs + fat)
+    const goals = await pool.query(
+      'SELECT target_kcal, target_protein_g, target_carbs_g, target_fat_g ' +
+      'FROM user_goals WHERE user_id = $1',
+      [req.userId]
+    );
+    const target = goals.rows[0] || {
+      target_kcal: null,
+      target_protein_g: null,
+      target_carbs_g: null,
+      target_fat_g: null,
+    };
+
+    const kcalInTotal = parseInt(kcalIn.rows[0].total, 10);
 
     res.json({
       date: date,
-      kcal_in: parseInt(kcalIn.rows[0].total, 10),
-      kcal_out_activity: parseInt(kcalOut.rows[0].total, 10),
+      kcal_in: kcalInTotal,
+      kcal_out_activity: kcalOutTotal,
       protein_g: parseFloat(kcalIn.rows[0].protein),
       carbs_g: parseFloat(kcalIn.rows[0].carbs),
       fat_g: parseFloat(kcalIn.rows[0].fat),
       target_kcal: target.target_kcal,
       target_protein_g: target.target_protein_g,
-      kcal_remaining: target.target_kcal ? (target.target_kcal - parseInt(kcalIn.rows[0].total, 10) + parseInt(kcalOut.rows[0].total, 10)) : null
+      target_carbs_g: target.target_carbs_g,
+      target_fat_g: target.target_fat_g,
+      // Lifesum-style: tilbage = mål + forbrændt − spist
+      kcal_remaining: target.target_kcal
+        ? (target.target_kcal + kcalOutTotal - kcalInTotal)
+        : null,
     });
   } catch (err) {
     console.error('Daily summary error:', err);
