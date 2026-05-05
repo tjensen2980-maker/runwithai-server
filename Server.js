@@ -1,4 +1,4 @@
-// ═══════════════════════════════════════════════════════════════════════════
+﻿// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SERVER.JS - RunWithAI Backend v3.0.1-revenuecat
 // Med Apple In-App Purchase support
 // Med RevenueCat subscription activate endpoint
@@ -9,7 +9,7 @@
 // Med friends endpoints
 // Med voice coach (Whisper + AI)
 // Med password reset endpoints
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -17,20 +17,22 @@ const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
 const Stripe = require('stripe');
 const multer = require('multer');
+const { registerStrengthEndpoints } = require('./strengthEndpoints');
+const { registerMealPlanEndpoints } = require('./mealPlanEndpoints');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
-// ─── DATABASE ───────────────────────────────────────────────────────────────
+// â”€â”€â”€ DATABASE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// ─── STRIPE ─────────────────────────────────────────────────────────────────
+// â”€â”€â”€ STRIPE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-// ─── SUBSCRIPTION TIERS ─────────────────────────────────────────────────────
+// â”€â”€â”€ SUBSCRIPTION TIERS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const TIERS = {
   free: {
     maxRunsPerMonth: 10,
@@ -42,7 +44,7 @@ const TIERS = {
   }
 };
 
-// ─── PASSWORD RESET CODES (in-memory store) ─────────────────────────────────
+// â”€â”€â”€ PASSWORD RESET CODES (in-memory store) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const resetCodes = new Map(); // email -> { code, expires, userId }
 const { Resend } = require('resend');
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
@@ -51,7 +53,7 @@ function generateResetCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
-// ─── MIDDLEWARE ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ MIDDLEWARE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Stripe webhook MUST be before express.json()
 app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (req, res) => {
   const sig = req.headers['stripe-signature'];
@@ -74,7 +76,7 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
             stripe_subscription_id = $1
         WHERE stripe_customer_id = $2
       `, [subscriptionId, customerId]);
-      console.log('✅ Subscription activated for customer:', customerId);
+      console.log('âœ… Subscription activated for customer:', customerId);
       break;
     }
     case 'customer.subscription.updated': {
@@ -87,7 +89,7 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
             subscription_ends_at = to_timestamp($2)
         WHERE stripe_customer_id = $3
       `, [status, subscription.current_period_end, customerId]);
-      console.log('🔄 Subscription updated:', status);
+      console.log('ðŸ”„ Subscription updated:', status);
       break;
     }
     case 'customer.subscription.deleted': {
@@ -100,7 +102,7 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
             stripe_subscription_id = NULL
         WHERE stripe_customer_id = $1
       `, [customerId]);
-      console.log('❌ Subscription canceled for customer:', customerId);
+      console.log('âŒ Subscription canceled for customer:', customerId);
       break;
     }
   }
@@ -111,10 +113,10 @@ app.post('/webhook/stripe', express.raw({ type: 'application/json' }), async (re
 app.use(express.json({ limit: '10mb' }));
 app.use(cors());
 
-// ─── JWT SECRET ─────────────────────────────────────────────────────────────
+// â”€â”€â”€ JWT SECRET â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const JWT_SECRET = process.env.JWT_SECRET || 'runwithai-secret-key-2024';
 
-// ─── AUTH MIDDLEWARE ────────────────────────────────────────────────────────
+// â”€â”€â”€ AUTH MIDDLEWARE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -130,14 +132,14 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // AUTH ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.post('/register', async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
-      return res.status(400).json({ error: 'Email og adgangskode påkrævet' });
+      return res.status(400).json({ error: 'Email og adgangskode pÃ¥krÃ¦vet' });
     }
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
     if (existing.rows.length > 0) {
@@ -163,7 +165,7 @@ app.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
-      return res.status(400).json({ error: 'Email og adgangskode påkrævet' });
+      return res.status(400).json({ error: 'Email og adgangskode pÃ¥krÃ¦vet' });
     }
     const result = await pool.query('SELECT * FROM users WHERE email = $1', [email.toLowerCase()]);
     if (result.rows.length === 0) {
@@ -189,17 +191,17 @@ app.post('/login', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // PASSWORD RESET ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-// ─── FORGOT PASSWORD ────────────────────────────────────────────────────────
+// â”€â”€â”€ FORGOT PASSWORD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/forgot-password', async (req, res) => {
   try {
     const { email } = req.body;
     
     if (!email) {
-      return res.status(400).json({ error: 'Email påkrævet' });
+      return res.status(400).json({ error: 'Email pÃ¥krÃ¦vet' });
     }
 
     // Check if user exists
@@ -232,14 +234,14 @@ app.post('/forgot-password', async (req, res) => {
           subject: 'Nulstil din RunWithAI adgangskode',
           html: `
             <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 500px; margin: 0 auto; padding: 20px;">
-              <h2 style="color: #fa3c00; margin-bottom: 24px;">🏃 RunWithAI</h2>
+              <h2 style="color: #fa3c00; margin-bottom: 24px;">ðŸƒ RunWithAI</h2>
               <p style="font-size: 16px; color: #333;">Hej!</p>
               <p style="font-size: 16px; color: #333;">Du har anmodet om at nulstille din adgangskode.</p>
               <p style="font-size: 16px; color: #333;">Din nulstillingskode er:</p>
               <div style="background: #f5f5f5; padding: 24px; text-align: center; font-size: 36px; font-weight: bold; letter-spacing: 6px; margin: 24px 0; border-radius: 12px; color: #fa3c00;">
                 ${code}
               </div>
-              <p style="font-size: 14px; color: #666;">Koden udløber om 15 minutter.</p>
+              <p style="font-size: 14px; color: #666;">Koden udlÃ¸ber om 15 minutter.</p>
               <p style="font-size: 14px; color: #666;">Hvis du ikke har anmodet om dette, kan du ignorere denne email.</p>
               <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">
               <p style="font-size: 12px; color: #999;">Venlig hilsen,<br>RunWithAI Team</p>
@@ -259,17 +261,17 @@ app.post('/forgot-password', async (req, res) => {
   }
 });
 
-// ─── RESET PASSWORD ─────────────────────────────────────────────────────────
+// â”€â”€â”€ RESET PASSWORD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/reset-password', async (req, res) => {
   try {
     const { email, code, newPassword } = req.body;
 
     if (!email || !code || !newPassword) {
-      return res.status(400).json({ error: 'Email, kode og ny adgangskode påkrævet' });
+      return res.status(400).json({ error: 'Email, kode og ny adgangskode pÃ¥krÃ¦vet' });
     }
 
     if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'Adgangskode skal være mindst 6 tegn' });
+      return res.status(400).json({ error: 'Adgangskode skal vÃ¦re mindst 6 tegn' });
     }
 
     // Check reset code
@@ -281,7 +283,7 @@ app.post('/reset-password', async (req, res) => {
 
     if (Date.now() > resetData.expires) {
       resetCodes.delete(email.toLowerCase());
-      return res.status(400).json({ error: 'Koden er udløbet. Anmod om ny kode.' });
+      return res.status(400).json({ error: 'Koden er udlÃ¸bet. Anmod om ny kode.' });
     }
 
     if (resetData.code !== code) {
@@ -308,13 +310,13 @@ app.post('/reset-password', async (req, res) => {
   }
 });
 
-// ─── VERIFY RESET CODE (optional) ───────────────────────────────────────────
+// â”€â”€â”€ VERIFY RESET CODE (optional) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/verify-reset-code', async (req, res) => {
   try {
     const { email, code } = req.body;
 
     if (!email || !code) {
-      return res.status(400).json({ error: 'Email og kode påkrævet' });
+      return res.status(400).json({ error: 'Email og kode pÃ¥krÃ¦vet' });
     }
 
     const resetData = resetCodes.get(email.toLowerCase());
@@ -325,7 +327,7 @@ app.post('/verify-reset-code', async (req, res) => {
 
     if (Date.now() > resetData.expires) {
       resetCodes.delete(email.toLowerCase());
-      return res.status(400).json({ error: 'Koden er udløbet' });
+      return res.status(400).json({ error: 'Koden er udlÃ¸bet' });
     }
 
     if (resetData.code !== code) {
@@ -339,9 +341,9 @@ app.post('/verify-reset-code', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // PROFILE ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/profile', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -374,9 +376,9 @@ app.put('/profile', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // DELETE ACCOUNT ENDPOINT (Apple App Store krav)
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.delete('/delete-account', authMiddleware, async (req, res) => {
   const userId = req.userId;
   console.log(`Delete account request for userId: ${userId}`);
@@ -432,18 +434,18 @@ app.delete('/delete-account', authMiddleware, async (req, res) => {
     await pool.query('DELETE FROM users WHERE id = $1', [userId]);
     await pool.query('COMMIT');
 
-    console.log(`✅ Account deleted successfully: userId=${userId}, email=${user.email}`);
+    console.log(`âœ… Account deleted successfully: userId=${userId}, email=${user.email}`);
     res.json({ success: true, message: 'Din konto og alle data er blevet slettet permanent.' });
   } catch (err) {
     await pool.query('ROLLBACK');
-    console.error('❌ Delete account error:', err);
-    res.status(500).json({ error: 'Kunne ikke slette konto. Prøv igen senere.' });
+    console.error('âŒ Delete account error:', err);
+    res.status(500).json({ error: 'Kunne ikke slette konto. PrÃ¸v igen senere.' });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SUBSCRIPTION ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/subscription', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -479,7 +481,7 @@ app.get('/subscription', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── ACTIVATE SUBSCRIPTION (fra RevenueCat) ─────────────────────────────────
+// â”€â”€â”€ ACTIVATE SUBSCRIPTION (fra RevenueCat) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/subscription/activate', authMiddleware, async (req, res) => {
   try {
     const { revenueCatId } = req.body;
@@ -509,13 +511,13 @@ app.post('/subscription/activate', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── APPLE IAP RECEIPT VALIDATION ───────────────────────────────────────────
+// â”€â”€â”€ APPLE IAP RECEIPT VALIDATION â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/validate-receipt', authMiddleware, async (req, res) => {
   try {
     const { receipt, productId } = req.body;
 
     if (!receipt) {
-      return res.status(400).json({ error: 'Receipt påkrævet' });
+      return res.status(400).json({ error: 'Receipt pÃ¥krÃ¦vet' });
     }
 
     // Validate receipt with Apple
@@ -566,7 +568,7 @@ app.post('/validate-receipt', authMiddleware, async (req, res) => {
 
   } catch (err) {
     console.error('Apple receipt validation error:', err);
-    res.status(500).json({ error: 'Kunne ikke validere køb' });
+    res.status(500).json({ error: 'Kunne ikke validere kÃ¸b' });
   }
 });
 
@@ -601,7 +603,7 @@ async function processAppleReceipt(data, userId, res) {
       console.log(`[APPLE IAP] User ${userId} upgraded to Pro, expires: ${expiresAt}`);
       return res.json({ success: true, tier: 'pro', expiresAt });
     } else {
-      return res.status(400).json({ error: 'Subscription er udløbet' });
+      return res.status(400).json({ error: 'Subscription er udlÃ¸bet' });
     }
   } catch (err) {
     console.error('Process Apple receipt error:', err);
@@ -609,7 +611,7 @@ async function processAppleReceipt(data, userId, res) {
   }
 }
 
-// ─── RESTORE APPLE PURCHASES ────────────────────────────────────────────────
+// â”€â”€â”€ RESTORE APPLE PURCHASES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/restore-purchases', authMiddleware, async (req, res) => {
   try {
     const { purchases } = req.body;
@@ -689,7 +691,7 @@ app.post('/restore-purchases', authMiddleware, async (req, res) => {
     res.json({ success: true, hasActiveSub, expiresAt: latestExpiry });
   } catch (err) {
     console.error('Restore purchases error:', err);
-    res.status(500).json({ error: 'Kunne ikke gendanne køb' });
+    res.status(500).json({ error: 'Kunne ikke gendanne kÃ¸b' });
   }
 });
 
@@ -753,13 +755,13 @@ app.post('/create-portal-session', authMiddleware, async (req, res) => {
     res.json({ url: session.url });
   } catch (err) {
     console.error('Create portal error:', err);
-    res.status(500).json({ error: 'Kunne ikke åbne kundeportal' });
+    res.status(500).json({ error: 'Kunne ikke Ã¥bne kundeportal' });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // RUNS ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/runs', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -769,7 +771,7 @@ app.get('/runs', authMiddleware, async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error('Get runs error:', err);
-    res.status(500).json({ error: 'Kunne ikke hente løb' });
+    res.status(500).json({ error: 'Kunne ikke hente lÃ¸b' });
   }
 });
 
@@ -804,7 +806,7 @@ app.post('/runs', authMiddleware, async (req, res) => {
 
     const savedRun = result.rows[0];
 
-    // ─── AUTO-LOG TO ACTIVE CHALLENGES ────────────────────────────────────
+    // â”€â”€â”€ AUTO-LOG TO ACTIVE CHALLENGES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try {
       await logChallengeActivity(req.userId, savedRun.id, savedRun.km, savedRun.date);
     } catch (chalErr) {
@@ -814,7 +816,7 @@ app.post('/runs', authMiddleware, async (req, res) => {
     res.json(savedRun);
   } catch (err) {
     console.error('Save run error:', err);
-    res.status(500).json({ error: 'Kunne ikke gemme løb' });
+    res.status(500).json({ error: 'Kunne ikke gemme lÃ¸b' });
   }
 });
 
@@ -827,18 +829,18 @@ app.delete('/runs/:id', authMiddleware, async (req, res) => {
       [runId, req.userId]
     );
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Løb ikke fundet' });
+      return res.status(404).json({ error: 'LÃ¸b ikke fundet' });
     }
     res.json({ success: true, deletedId: result.rows[0].id });
   } catch (err) {
     console.error('Delete run error:', err);
-    res.status(500).json({ error: 'Kunne ikke slette løb' });
+    res.status(500).json({ error: 'Kunne ikke slette lÃ¸b' });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // CHALLENGES & STREAKS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 // Helper: generate a short invite code
 function generateInviteCode() {
@@ -900,13 +902,13 @@ async function logChallengeActivity(userId, runId, km, date) {
   }
 }
 
-// ─── CREATE CHALLENGE ───────────────────────────────────────────────────────
+// â”€â”€â”€ CREATE CHALLENGE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/challenges', authMiddleware, async (req, res) => {
   try {
     const { title, description, type, target_value, target_period, end_date } = req.body;
 
     if (!title || !target_value) {
-      return res.status(400).json({ error: 'Titel og mål er påkrævet' });
+      return res.status(400).json({ error: 'Titel og mÃ¥l er pÃ¥krÃ¦vet' });
     }
 
     const inviteCode = generateInviteCode();
@@ -941,7 +943,7 @@ app.post('/challenges', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── GET MY CHALLENGES ──────────────────────────────────────────────────────
+// â”€â”€â”€ GET MY CHALLENGES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/challenges', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(`
@@ -975,13 +977,13 @@ app.get('/challenges', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── JOIN CHALLENGE BY INVITE CODE ──────────────────────────────────────────
+// â”€â”€â”€ JOIN CHALLENGE BY INVITE CODE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/challenges/join', authMiddleware, async (req, res) => {
   try {
     const { invite_code } = req.body;
 
     if (!invite_code) {
-      return res.status(400).json({ error: 'Invite-kode påkrævet' });
+      return res.status(400).json({ error: 'Invite-kode pÃ¥krÃ¦vet' });
     }
 
     const challenge = await pool.query(
@@ -1016,7 +1018,7 @@ app.post('/challenges/join', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── LOG ACTIVITY (manual – auto-log happens in POST /runs) ─────────────────
+// â”€â”€â”€ LOG ACTIVITY (manual â€“ auto-log happens in POST /runs) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/challenges/log', authMiddleware, async (req, res) => {
   try {
     const { run_id, km, date } = req.body;
@@ -1028,7 +1030,7 @@ app.post('/challenges/log', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── GET CHALLENGE DETAILS ──────────────────────────────────────────────────
+// â”€â”€â”€ GET CHALLENGE DETAILS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/challenges/:id', authMiddleware, async (req, res) => {
   try {
     const challengeId = req.params.id;
@@ -1065,7 +1067,7 @@ app.get('/challenges/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── LEAVE CHALLENGE ────────────────────────────────────────────────────────
+// â”€â”€â”€ LEAVE CHALLENGE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.delete('/challenges/:id/leave', authMiddleware, async (req, res) => {
   try {
     const challengeId = req.params.id;
@@ -1091,11 +1093,11 @@ app.delete('/challenges/:id/leave', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // PHOTO STORY ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-// ─── UPLOAD PHOTO DURING RUN ────────────────────────────────────────────────
+// â”€â”€â”€ UPLOAD PHOTO DURING RUN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/runs/:runId/photos', authMiddleware, async (req, res) => {
   try {
     const { runId } = req.params;
@@ -1120,7 +1122,7 @@ app.post('/runs/:runId/photos', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── GET PHOTOS FOR A RUN ───────────────────────────────────────────────────
+// â”€â”€â”€ GET PHOTOS FOR A RUN â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/runs/:runId/photos', authMiddleware, async (req, res) => {
   try {
     const { runId } = req.params;
@@ -1137,7 +1139,7 @@ app.get('/runs/:runId/photos', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── GENERATE AI STORY FROM RUN + PHOTOS ────────────────────────────────────
+// â”€â”€â”€ GENERATE AI STORY FROM RUN + PHOTOS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/runs/:runId/story', authMiddleware, async (req, res) => {
   try {
     const { runId } = req.params;
@@ -1159,7 +1161,7 @@ app.post('/runs/:runId/story', authMiddleware, async (req, res) => {
     // Get user profile for name
     const profile = await pool.query('SELECT data FROM profile WHERE user_id = $1', [req.userId]);
     const profileData = profile.rows[0]?.data;
-    const userName = (typeof profileData === 'string' ? JSON.parse(profileData) : profileData)?.name || 'Løber';
+    const userName = (typeof profileData === 'string' ? JSON.parse(profileData) : profileData)?.name || 'LÃ¸ber';
 
     const runData = run.rows[0];
     const km = parseFloat(runData.km || 0).toFixed(1);
@@ -1169,18 +1171,18 @@ app.post('/runs/:runId/story', authMiddleware, async (req, res) => {
     // Build prompt for AI story
     const photoDescriptions = photos.rows.map((p, i) => {
       const time = new Date(p.taken_at).toLocaleTimeString('da-DK', { hour: '2-digit', minute: '2-digit' });
-      return `Foto ${i + 1}: taget kl. ${time}${p.caption ? ` – "${p.caption}"` : ''}${p.latitude ? ` (${parseFloat(p.latitude).toFixed(4)}, ${parseFloat(p.longitude).toFixed(4)})` : ''}`;
+      return `Foto ${i + 1}: taget kl. ${time}${p.caption ? ` â€“ "${p.caption}"` : ''}${p.latitude ? ` (${parseFloat(p.latitude).toFixed(4)}, ${parseFloat(p.longitude).toFixed(4)})` : ''}`;
     }).join('\n');
 
-    const prompt = `Du er en kreativ løbe-historiefortæller for appen RunWithAI. Skriv en kort, engagerende løbe-story på dansk (max 200 ord) baseret på dette løb:
+    const prompt = `Du er en kreativ lÃ¸be-historiefortÃ¦ller for appen RunWithAI. Skriv en kort, engagerende lÃ¸be-story pÃ¥ dansk (max 200 ord) baseret pÃ¥ dette lÃ¸b:
 
-Løber: ${userName}
+LÃ¸ber: ${userName}
 Distance: ${km} km
 Varighed: ${duration}
 Antal fotos: ${photoCount}
 ${photoDescriptions ? `\nFotos undervejs:\n${photoDescriptions}` : ''}
 
-Skriv en livlig, motiverende fortælling i 2. person ("du") der beskriver løbeturen som en eventyrlig rejse. Brug foto-tidspunkterne og eventuelle captions til at flette billederne naturligt ind i historien. Tilføj emoji hvor det passer. Afslut med en opmuntrende kommentar.
+Skriv en livlig, motiverende fortÃ¦lling i 2. person ("du") der beskriver lÃ¸beturen som en eventyrlig rejse. Brug foto-tidspunkterne og eventuelle captions til at flette billederne naturligt ind i historien. TilfÃ¸j emoji hvor det passer. Afslut med en opmuntrende kommentar.
 
 Svar KUN med selve historieteksten, ingen overskrift.`;
 
@@ -1231,7 +1233,7 @@ Svar KUN med selve historieteksten, ingen overskrift.`;
   }
 });
 
-// ─── GET EXISTING STORY ─────────────────────────────────────────────────────
+// â”€â”€â”€ GET EXISTING STORY â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/runs/:runId/story', authMiddleware, async (req, res) => {
   try {
     const { runId } = req.params;
@@ -1254,7 +1256,7 @@ app.get('/runs/:runId/story', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── SHARE STORY TO FEED ────────────────────────────────────────────────────
+// â”€â”€â”€ SHARE STORY TO FEED â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/runs/:runId/story/share', authMiddleware, async (req, res) => {
   try {
     const { runId } = req.params;
@@ -1277,7 +1279,7 @@ app.post('/runs/:runId/story/share', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── GET SHARED STORIES FROM FRIENDS ────────────────────────────────────────
+// â”€â”€â”€ GET SHARED STORIES FROM FRIENDS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/feed/stories', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -1301,9 +1303,9 @@ app.get('/feed/stories', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // TRAINING PLAN ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/trainingplan', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -1313,7 +1315,7 @@ app.get('/trainingplan', authMiddleware, async (req, res) => {
     res.json(result.rows[0] || null);
   } catch (err) {
     console.error('Get training plan error:', err);
-    res.status(500).json({ error: 'Kunne ikke hente træningsplan' });
+    res.status(500).json({ error: 'Kunne ikke hente trÃ¦ningsplan' });
   }
 });
 
@@ -1329,13 +1331,13 @@ app.post('/trainingplan/save', authMiddleware, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('Save training plan error:', err);
-    res.status(500).json({ error: 'Kunne ikke gemme træningsplan' });
+    res.status(500).json({ error: 'Kunne ikke gemme trÃ¦ningsplan' });
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // WEEK PLAN ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/weekplan', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -1365,14 +1367,14 @@ app.post('/weekplan', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// TTS ENDPOINT (OpenAI gpt-4o-mini-tts – natural voice with instructions)
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// TTS ENDPOINT (OpenAI gpt-4o-mini-tts â€“ natural voice with instructions)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.post('/tts', authMiddleware, async (req, res) => {
   try {
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     if (!OPENAI_API_KEY) {
-      return res.status(500).json({ error: 'TTS ikke konfigureret (mangler OpenAI API nøgle)' });
+      return res.status(500).json({ error: 'TTS ikke konfigureret (mangler OpenAI API nÃ¸gle)' });
     }
     const { text, voice } = req.body;
     if (!text) return res.status(400).json({ error: 'Mangler text' });
@@ -1387,7 +1389,7 @@ app.post('/tts', authMiddleware, async (req, res) => {
         model: 'gpt-4o-mini-tts',
         input: text,
         voice: voice || 'marin',
-        instructions: 'Du er en venlig og energisk dansk løbecoach. Tal tydeligt og naturligt på dansk med et opmuntrende tonefald. Hold en rolig men motiverende stemme.',
+        instructions: 'Du er en venlig og energisk dansk lÃ¸becoach. Tal tydeligt og naturligt pÃ¥ dansk med et opmuntrende tonefald. Hold en rolig men motiverende stemme.',
         response_format: 'mp3',
         speed: 1.0,
       }),
@@ -1411,14 +1413,14 @@ app.post('/tts', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // AI CHAT ENDPOINT (proxy to Anthropic API)
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.post('/chat', authMiddleware, async (req, res) => {
   try {
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
     if (!ANTHROPIC_API_KEY) {
-      return res.status(500).json({ error: 'AI coach ikke konfigureret (mangler API nøgle)' });
+      return res.status(500).json({ error: 'AI coach ikke konfigureret (mangler API nÃ¸gle)' });
     }
     const { model, max_tokens, system, messages } = req.body;
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1447,9 +1449,9 @@ app.post('/chat', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // MESSAGES ENDPOINTS (chat history)
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/messages', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -1494,11 +1496,11 @@ app.delete('/messages', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // FRIENDS ENDPOINTS
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
-// ─── GET MY FRIENDS ─────────────────────────────────────────────────────────
+// â”€â”€â”€ GET MY FRIENDS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/friends', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(`
@@ -1518,11 +1520,11 @@ app.get('/friends', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── SEND FRIEND REQUEST ────────────────────────────────────────────────────
+// â”€â”€â”€ SEND FRIEND REQUEST â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/friends/request', authMiddleware, async (req, res) => {
   try {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ error: 'Email påkrævet' });
+    if (!email) return res.status(400).json({ error: 'Email pÃ¥krÃ¦vet' });
 
     const userResult = await pool.query('SELECT id FROM users WHERE email = $1', [email.toLowerCase()]);
     if (userResult.rows.length === 0) {
@@ -1531,7 +1533,7 @@ app.post('/friends/request', authMiddleware, async (req, res) => {
 
     const friendId = userResult.rows[0].id;
     if (friendId === req.userId) {
-      return res.status(400).json({ error: 'Du kan ikke tilføje dig selv' });
+      return res.status(400).json({ error: 'Du kan ikke tilfÃ¸je dig selv' });
     }
 
     const existing = await pool.query(
@@ -1559,7 +1561,7 @@ app.post('/friends/request', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── RESPOND TO FRIEND REQUEST ──────────────────────────────────────────────
+// â”€â”€â”€ RESPOND TO FRIEND REQUEST â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/friends/:id/respond', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1580,11 +1582,11 @@ app.post('/friends/:id/respond', authMiddleware, async (req, res) => {
     }
   } catch (err) {
     console.error('Respond to friend error:', err);
-    res.status(500).json({ error: 'Kunne ikke svare på anmodning' });
+    res.status(500).json({ error: 'Kunne ikke svare pÃ¥ anmodning' });
   }
 });
 
-// ─── REMOVE FRIEND ──────────────────────────────────────────────────────────
+// â”€â”€â”€ REMOVE FRIEND â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.delete('/friends/:id', authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1599,7 +1601,7 @@ app.delete('/friends/:id', authMiddleware, async (req, res) => {
   }
 });
 
-// ─── FRIENDS FEED ───────────────────────────────────────────────────────────
+// â”€â”€â”€ FRIENDS FEED â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.get('/friends/feed', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(`
@@ -1625,9 +1627,9 @@ app.get('/friends/feed', authMiddleware, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // VOICE COACH ENDPOINT (Whisper transcription + AI response)
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res) => {
   try {
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -1642,7 +1644,7 @@ app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res
     // Get user profile for name
     const profileResult = await pool.query('SELECT data FROM profile WHERE user_id = $1', [req.userId]);
     const profileData = profileResult.rows[0]?.data;
-    const userName = (typeof profileData === 'string' ? JSON.parse(profileData) : profileData)?.name || 'løber';
+    const userName = (typeof profileData === 'string' ? JSON.parse(profileData) : profileData)?.name || 'lÃ¸ber';
 
     // Parse run context
     let runContext = {};
@@ -1650,7 +1652,7 @@ app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res
       if (req.body.context) runContext = JSON.parse(req.body.context);
     } catch {}
 
-    // ─── Step 1: Transcribe with Whisper ──────────────────────────────────
+    // â”€â”€â”€ Step 1: Transcribe with Whisper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const whisperForm = new FormData();
     const audioBlob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/m4a' });
     whisperForm.append('file', audioBlob, 'voice.m4a');
@@ -1676,28 +1678,28 @@ app.post('/voice-coach', authMiddleware, upload.single('audio'), async (req, res
     console.log(`[VoiceCoach] User said: "${userText}"`);
 
     if (!userText || userText.trim().length === 0) {
-      return res.json({ text: 'Jeg hørte dig ikke helt, prøv igen.', transcription: '' });
+      return res.json({ text: 'Jeg hÃ¸rte dig ikke helt, prÃ¸v igen.', transcription: '' });
     }
 
-    // ─── Step 2: AI Coach response ────────────────────────────────────────
+    // â”€â”€â”€ Step 2: AI Coach response â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     const kmStr = runContext.km ? `${runContext.km.toFixed(1)} km` : 'ukendt';
     const paceStr = runContext.pace ? `${Math.floor(runContext.pace)}:${String(Math.round((runContext.pace % 1) * 60)).padStart(2, '0')} min/km` : 'ukendt';
     const durationMins = runContext.duration ? Math.floor(runContext.duration / 60) : 0;
 
-    const systemPrompt = `Du er en venlig og energisk dansk løbecoach i appen RunWithAI. Brugeren hedder ${userName} og er midt i et løb.
+    const systemPrompt = `Du er en venlig og energisk dansk lÃ¸becoach i appen RunWithAI. Brugeren hedder ${userName} og er midt i et lÃ¸b.
 
-Aktuelle løbdata:
+Aktuelle lÃ¸bdata:
 - Distance: ${kmStr}
 - Pace: ${paceStr}
 - Tid: ${durationMins} minutter
 
 Regler:
-- Svar KORT (max 2-3 sætninger) – brugeren løber og kan ikke læse lange svar
-- Vær opmuntrende og positiv
-- Svar på dansk
-- Hvis de spørger om deres tempo/distance, brug de aktuelle data
+- Svar KORT (max 2-3 sÃ¦tninger) â€“ brugeren lÃ¸ber og kan ikke lÃ¦se lange svar
+- VÃ¦r opmuntrende og positiv
+- Svar pÃ¥ dansk
+- Hvis de spÃ¸rger om deres tempo/distance, brug de aktuelle data
 - Hvis de beder om motivation, giv en kort energisk peptalk
-- Hvis de vil vide noget om løb/træning, giv et kort svar`;
+- Hvis de vil vide noget om lÃ¸b/trÃ¦ning, giv et kort svar`;
 
     const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -1730,17 +1732,726 @@ Regler:
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // ROOT ENDPOINT
-// ═══════════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 app.get('/', (req, res) => {
-  res.json({ status: 'RunWithAI server kører!', version: '3.0.1-revenuecat' });
+  res.json({ status: 'RunWithAI server kÃ¸rer!', version: '3.0.1-revenuecat' });
+});
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// START SERVER
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// MULTI-ACTIVITY ENDPOINTS (v2 - activities, exercises, goals)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+// â”€â”€â”€ ACTIVITIES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// GET /activities - Hent alle aktiviteter for brugeren
+app.get('/activities', authMiddleware, async (req, res) => {
+  try {
+    const { type, limit } = req.query;
+    let query = 'SELECT * FROM activities WHERE user_id = $1';
+    const params = [req.userId];
+
+    if (type) {
+      query += ' AND type = $2';
+      params.push(type);
+    }
+
+    query += ' ORDER BY started_at DESC';
+
+    if (limit) {
+      query += ' LIMIT $' + (params.length + 1);
+      params.push(parseInt(limit, 10));
+    }
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get activities error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente aktiviteter' });
+  }
+});
+
+// POST /activities - Opret en ny aktivitet
+app.post('/activities', authMiddleware, async (req, res) => {
+  try {
+    const a = req.body;
+
+    // Validering af type
+    const validTypes = ['run', 'walk', 'bike', 'strength', 'mobility', 'other'];
+    if (!a.type || !validTypes.includes(a.type)) {
+      return res.status(400).json({ error: 'Ugyldig aktivitetstype' });
+    }
+    if (!a.started_at) {
+      return res.status(400).json({ error: 'started_at er pÃ¥krÃ¦vet' });
+    }
+
+    const result = await pool.query(
+      'INSERT INTO activities (user_id, type, started_at, duration_sec, calories_kcal, avg_hr, max_hr, perceived_effort, notes, source) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
+      [
+        req.userId,
+        a.type,
+        a.started_at,
+        a.duration_sec || null,
+        a.calories_kcal || null,
+        a.avg_hr || null,
+        a.max_hr || null,
+        a.perceived_effort || null,
+        a.notes || null,
+        a.source || 'manual'
+      ]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Create activity error:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme aktivitet' });
+  }
+});
+
+// â”€â”€â”€ EXERCISES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// GET /exercises - Hent alle tilgÃ¦ngelige Ã¸velser (offentlige + brugerens egne)
+app.get('/exercises', authMiddleware, async (req, res) => {
+  try {
+    const { category, muscle_group } = req.query;
+    let query = 'SELECT * FROM exercises WHERE is_custom = false OR created_by = $1';
+    const params = [req.userId];
+
+    if (category) {
+      query += ' AND category = $' + (params.length + 1);
+      params.push(category);
+    }
+    if (muscle_group) {
+      query += ' AND $' + (params.length + 1) + ' = ANY(muscle_groups)';
+      params.push(muscle_group);
+    }
+
+    query += ' ORDER BY name ASC';
+
+    const result = await pool.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get exercises error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente Ã¸velser' });
+  }
+});
+
+// â”€â”€â”€ GOALS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// GET /goals - Hent brugerens mÃ¥l (eller null hvis ingen er sat endnu)
+app.get('/goals', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM user_goals WHERE user_id = $1',
+      [req.userId]
+    );
+    res.json(result.rows[0] || null);
+  } catch (err) {
+    console.error('Get goals error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente mÃ¥l' });
+  }
+});
+
+// PUT /goals - Opret eller opdatÃ©r brugerens mÃ¥l
+app.put('/goals', authMiddleware, async (req, res) => {
+  try {
+    const g = req.body;
+    const validGoals = ['lose_fat', 'gain_muscle', 'run_faster', 'run_longer', 'maintain'];
+    if (g.primary_goal && !validGoals.includes(g.primary_goal)) {
+      return res.status(400).json({ error: 'Ugyldigt mÃ¥l' });
+    }
+    const result = await pool.query(
+      'INSERT INTO user_goals (user_id, primary_goal, target_weight_kg, target_kcal, target_protein_g, target_carbs_g, target_fat_g, weekly_run_km, weekly_strength_sessions, race_date, race_distance_km, updated_at) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW()) ' +
+      'ON CONFLICT (user_id) DO UPDATE SET ' +
+      '  primary_goal = EXCLUDED.primary_goal, ' +
+      '  target_weight_kg = EXCLUDED.target_weight_kg, ' +
+      '  target_kcal = EXCLUDED.target_kcal, ' +
+      '  target_protein_g = EXCLUDED.target_protein_g, ' +
+      '  target_carbs_g = EXCLUDED.target_carbs_g, ' +
+      '  target_fat_g = EXCLUDED.target_fat_g, ' +
+      '  weekly_run_km = EXCLUDED.weekly_run_km, ' +
+      '  weekly_strength_sessions = EXCLUDED.weekly_strength_sessions, ' +
+      '  race_date = EXCLUDED.race_date, ' +
+      '  race_distance_km = EXCLUDED.race_distance_km, ' +
+      '  updated_at = NOW() ' +
+      'RETURNING *',
+      [
+        req.userId,
+        g.primary_goal || null,
+        g.target_weight_kg || null,
+        g.target_kcal || null,
+        g.target_protein_g || null,
+        g.target_carbs_g || null,
+        g.target_fat_g || null,
+        g.weekly_run_km || null,
+        g.weekly_strength_sessions || null,
+        g.race_date || null,
+        g.race_distance_km || null
+      ]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Update goals error:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme mÃ¥l' });
+  }
+});
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// NUTRITION ENDPOINTS (v2 - meals, foods, daily summary)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+// â”€â”€â”€ MEALS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// GET /meals?date=YYYY-MM-DD - Hent mÃ¥ltider for en bestemt dag (default: i dag)
+app.get('/meals', authMiddleware, async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+
+    const result = await pool.query(
+      'SELECT m.*, ' +
+      '  COALESCE(json_agg(json_build_object(' +
+      '    \'id\', mi.id, \'food_id\', mi.food_id, \'amount_g\', mi.amount_g, ' +
+      '    \'kcal\', mi.kcal, \'protein_g\', mi.protein_g, \'carbs_g\', mi.carbs_g, \'fat_g\', mi.fat_g, ' +
+      '    \'food_name\', f.name, \'food_brand\', f.brand' +
+      '  )) FILTER (WHERE mi.id IS NOT NULL), \'[]\') AS items ' +
+      'FROM meals m ' +
+      'LEFT JOIN meal_items mi ON mi.meal_id = m.id ' +
+      'LEFT JOIN foods f ON f.id = mi.food_id ' +
+      'WHERE m.user_id = $1 AND DATE(m.eaten_at) = $2 ' +
+      'GROUP BY m.id ' +
+      'ORDER BY m.eaten_at ASC',
+      [req.userId, date]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get meals error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente mÃ¥ltider' });
+  }
+});
+
+// POST /meals - Log et nyt mÃ¥ltid med items
+// Body: { eaten_at, meal_type, notes, items: [{ food_id?, amount_g, kcal, protein_g, carbs_g, fat_g }] }
+app.post('/meals', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const m = req.body;
+
+    if (!m.eaten_at) {
+      return res.status(400).json({ error: 'eaten_at er pÃ¥krÃ¦vet' });
+    }
+    if (!Array.isArray(m.items) || m.items.length === 0) {
+      return res.status(400).json({ error: 'items er pÃ¥krÃ¦vet (mindst Ã©t item)' });
+    }
+
+    const validTypes = ['breakfast', 'lunch', 'dinner', 'snack'];
+    if (m.meal_type && !validTypes.includes(m.meal_type)) {
+      return res.status(400).json({ error: 'Ugyldig meal_type' });
+    }
+
+    await client.query('BEGIN');
+
+    const mealResult = await client.query(
+      'INSERT INTO meals (user_id, eaten_at, meal_type, notes, photo_url) ' +
+      'VALUES ($1, $2, $3, $4, $5) RETURNING *',
+      [req.userId, m.eaten_at, m.meal_type || null, m.notes || null, m.photo_url || null]
+    );
+    const meal = mealResult.rows[0];
+
+    const insertedItems = [];
+    for (const item of m.items) {
+      if (!item.amount_g || item.kcal === undefined) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Hvert item skal have amount_g og kcal' });
+      }
+      const itemResult = await client.query(
+        'INSERT INTO meal_items (meal_id, food_id, amount_g, kcal, protein_g, carbs_g, fat_g) ' +
+        'VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+        [
+          meal.id,
+          item.food_id || null,
+          item.amount_g,
+          item.kcal,
+          item.protein_g || 0,
+          item.carbs_g || 0,
+          item.fat_g || 0
+        ]
+      );
+      insertedItems.push(itemResult.rows[0]);
+    }
+
+    await client.query('COMMIT');
+    meal.items = insertedItems;
+    res.json(meal);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Create meal error:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme mÃ¥ltid' });
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /meals/:id - Slet et mÃ¥ltid (kun eget)
+app.delete('/meals/:id', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM meals WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.userId]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'MÃ¥ltid ikke fundet' });
+    }
+    res.json({ success: true, id: result.rows[0].id });
+  } catch (err) {
+    console.error('Delete meal error:', err);
+    res.status(500).json({ error: 'Kunne ikke slette mÃ¥ltid' });
+  }
+});
+
+// â”€â”€â”€ FOODS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// GET /foods/search?q=... - SÃ¸g i food database (lokal cache)
+app.get('/foods/search', authMiddleware, async (req, res) => {
+  try {
+    const q = (req.query.q || '').trim();
+    if (q.length < 2) {
+      return res.json([]);
+    }
+    const result = await pool.query(
+      'SELECT * FROM foods WHERE LOWER(name) LIKE $1 OR LOWER(brand) LIKE $1 ORDER BY is_verified DESC, name ASC LIMIT 50',
+      ['%' + q.toLowerCase() + '%']
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Search foods error:', err);
+    res.status(500).json({ error: 'Kunne ikke sÃ¸ge i fÃ¸devarer' });
+  }
+});
+
+// GET /foods/barcode/:ean - SlÃ¥ produkt op via stregkode (Open Food Facts)
+app.get('/foods/barcode/:ean', authMiddleware, async (req, res) => {
+  try {
+    const ean = req.params.ean.replace(/[^0-9]/g, '');
+    if (ean.length < 8) {
+      return res.status(400).json({ error: 'Ugyldig stregkode' });
+    }
+
+    // Tjek fÃ¸rst lokal cache
+    const cached = await pool.query(
+      "SELECT * FROM foods WHERE source = 'openfoodfacts' AND source_id = $1",
+      [ean]
+    );
+    if (cached.rows.length > 0) {
+      return res.json(cached.rows[0]);
+    }
+
+    // Hent fra Open Food Facts
+    const off = await fetch('https://world.openfoodfacts.org/api/v2/product/' + ean + '.json');
+    if (!off.ok) {
+      return res.status(404).json({ error: 'Produkt ikke fundet' });
+    }
+    const data = await off.json();
+    if (data.status !== 1 || !data.product) {
+      return res.status(404).json({ error: 'Produkt ikke fundet' });
+    }
+
+    const p = data.product;
+    const nutriments = p.nutriments || {};
+
+    if (nutriments['energy-kcal_100g'] === undefined) {
+      return res.status(404).json({ error: 'ErnÃ¦ringsdata mangler for dette produkt' });
+    }
+
+    // Cache i vores database
+    const inserted = await pool.query(
+      'INSERT INTO foods (source, source_id, name, brand, serving_size_g, kcal_per_100g, protein_g, carbs_g, fat_g, fiber_g, is_verified) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ' +
+      'ON CONFLICT (source, source_id) DO UPDATE SET ' +
+      '  name = EXCLUDED.name, brand = EXCLUDED.brand, kcal_per_100g = EXCLUDED.kcal_per_100g ' +
+      'RETURNING *',
+      [
+        'openfoodfacts',
+        ean,
+        p.product_name || p.generic_name || 'Ukendt produkt',
+        p.brands || null,
+        p.serving_quantity ? parseFloat(p.serving_quantity) : null,
+        nutriments['energy-kcal_100g'] || 0,
+        nutriments.proteins_100g || 0,
+        nutriments.carbohydrates_100g || 0,
+        nutriments.fat_100g || 0,
+        nutriments.fiber_100g || null,
+        false
+      ]
+    );
+
+    res.json(inserted.rows[0]);
+  } catch (err) {
+    console.error('Barcode lookup error:', err);
+    res.status(500).json({ error: 'Kunne ikke slÃ¥ stregkode op' });
+  }
+});
+
+// POST /foods/analyze-photo - AI-analyse af madbillede via Claude Vision
+app.post('/foods/analyze-photo', authMiddleware, async (req, res) => {
+  try {
+    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+    if (!ANTHROPIC_API_KEY) {
+      return res.status(500).json({ error: 'AI ikke konfigureret' });
+    }
+
+    const { image_base64, image_media_type } = req.body;
+    if (!image_base64) {
+      return res.status(400).json({ error: 'image_base64 er paakraevet' });
+    }
+
+    const mediaType = image_media_type || 'image/jpeg';
+
+    const systemPrompt = 'Du er en ernaeringsekspert der analyserer madbilleder. Returner ALTID kun gyldig JSON uden markdown eller forklaring. JSON skal have feltet "items" som er en array af objekter med felterne: name (dansk navn), estimated_grams (tal), kcal_per_100g (tal), protein_g (per 100g, tal), carbs_g (per 100g, tal), fat_g (per 100g, tal), confidence (0-1). Estimer maengder ud fra hvad du ser paa tallerkenen/glasset.';
+
+    const userPrompt = 'Analyser dette billede og identificer alle madvarer. Returner kun JSON.';
+
+    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1500,
+        system: systemPrompt,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data: image_base64 } },
+            { type: 'text', text: userPrompt }
+          ]
+        }],
+      }),
+    });
+
+    const data = await anthropicRes.json();
+    if (!anthropicRes.ok) {
+      console.error('Anthropic vision error:', data);
+      return res.status(anthropicRes.status).json({ error: 'AI fejl', details: data });
+    }
+
+    const textBlock = (data.content || []).find(b => b.type === 'text');
+    const rawText = textBlock ? textBlock.text : '';
+
+    let parsed;
+    try {
+      const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+      parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { items: [] };
+    } catch (e) {
+      console.error('JSON parse error:', e, 'Raw:', rawText);
+      return res.status(500).json({ error: 'AI svar kunne ikke parses', raw: rawText });
+    }
+
+    res.json({ items: parsed.items || [], raw: rawText });
+  } catch (err) {
+    console.error('analyze-photo error:', err);
+    res.status(500).json({ error: 'Foto-analyse fejlede' });
+  }
+});
+// POST /foods/custom - Opret egen mad (custom food)
+app.post('/foods/custom', authMiddleware, async (req, res) => {
+  try {
+    const f = req.body;
+    if (!f.name || f.kcal_per_100g === undefined) {
+      return res.status(400).json({ error: 'name og kcal_per_100g er pÃ¥krÃ¦vet' });
+    }
+    const result = await pool.query(
+      'INSERT INTO foods (source, source_id, name, brand, serving_size_g, kcal_per_100g, protein_g, carbs_g, fat_g, fiber_g, is_verified) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false) RETURNING *',
+      [
+        'custom',
+        'user_' + req.userId + '_' + Date.now(),
+        f.name,
+        f.brand || null,
+        f.serving_size_g || null,
+        f.kcal_per_100g,
+        f.protein_g || 0,
+        f.carbs_g || 0,
+        f.fat_g || 0,
+        f.fiber_g || null
+      ]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Create custom food error:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme fÃ¸devare' });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// START SERVER
+// LIFESUM-STYLE CALORIE CALCULATION (BMR + TDEE + målbaseret justering)
 // ═══════════════════════════════════════════════════════════════════════════
+
+// Aktivitetsfaktorer (matcher Lifesum's 5 niveauer)
+const ACTIVITY_FACTORS = {
+  sedentary:   1.2,
+  light:       1.375,
+  moderate:    1.55,
+  active:      1.725,
+  very_active: 1.9,
+};
+
+// Justering pr. mål og takt (kcal/dag i forhold til vedligehold)
+const GOAL_ADJUSTMENTS = {
+  lose_fat:    { slow: -250, normal: -500, fast: -750 },
+  maintain:    { slow:    0, normal:    0, fast:    0 },
+  gain_muscle: { slow: +250, normal: +400, fast: +500 },
+};
+
+// Makro-fordelinger (% af kcal: protein / kulhydrat / fedt)
+const MACRO_PLANS = {
+  balanced:     { protein: 0.25, carbs: 0.50, fat: 0.25 },
+  high_protein: { protein: 0.35, carbs: 0.40, fat: 0.25 },
+  low_carb:     { protein: 0.30, carbs: 0.25, fat: 0.45 },
+  keto:         { protein: 0.25, carbs: 0.05, fat: 0.70 },
+};
+
+// Mifflin-St Jeor BMR
+function calculateBMR({ weight_kg, height_cm, age, gender }) {
+  if (!weight_kg || !height_cm || !age || !gender) return null;
+  const base = 10 * weight_kg + 6.25 * height_cm - 5 * age;
+  return gender === 'female' ? base - 161 : base + 5;
+}
+
+// Beregn TDEE og daglige kcal/makro-mål
+function calculateTargets(input) {
+  const {
+    weight_kg, height_cm, age, gender,
+    activity_level, primary_goal, goal_pace, plan_type, target_weight_kg
+  } = input || {};
+
+  const bmr = calculateBMR({ weight_kg, height_cm, age, gender });
+  if (!bmr) return null;
+
+  const factor = ACTIVITY_FACTORS[activity_level] || ACTIVITY_FACTORS.moderate;
+  const tdee = Math.round(bmr * factor);
+
+  let goal = primary_goal || 'maintain';
+  if (target_weight_kg && weight_kg) {
+    if (target_weight_kg < weight_kg - 1) goal = 'lose_fat';
+    else if (target_weight_kg > weight_kg + 1) goal = 'gain_muscle';
+    else goal = 'maintain';
+  }
+
+  const pace = goal_pace || 'normal';
+  const adjust = (GOAL_ADJUSTMENTS[goal] && GOAL_ADJUSTMENTS[goal][pace]) || 0;
+
+  const minKcal = gender === 'female' ? 1200 : 1500;
+  const targetKcal = Math.max(minKcal, tdee + adjust);
+
+  const plan = MACRO_PLANS[plan_type] || MACRO_PLANS.balanced;
+  const proteinG = Math.round((targetKcal * plan.protein) / 4);
+  const carbsG   = Math.round((targetKcal * plan.carbs)   / 4);
+  const fatG     = Math.round((targetKcal * plan.fat)     / 9);
+
+  return {
+    bmr_kcal: Math.round(bmr),
+    tdee_kcal: tdee,
+    target_kcal: targetKcal,
+    target_protein_g: proteinG,
+    target_carbs_g: carbsG,
+    target_fat_g: fatG,
+    primary_goal: goal,
+    goal_pace: pace,
+    plan_type: plan_type || 'balanced',
+    activity_level: activity_level || 'moderate',
+  };
+}
+
+// ─── POST /goals/calculate - preview uden at gemme ────────────────────────
+app.post('/goals/calculate', authMiddleware, async (req, res) => {
+  try {
+    const result = calculateTargets(req.body || {});
+    if (!result) {
+      return res.status(400).json({ error: 'Mangler vægt, højde, alder eller køn' });
+    }
+    res.json(result);
+  } catch (err) {
+    console.error('Calculate goals error:', err);
+    res.status(500).json({ error: 'Kunne ikke beregne mål' });
+  }
+});
+
+// ─── POST /goals/auto - beregn fra profil + gem ───────────────────────────
+app.post('/goals/auto', authMiddleware, async (req, res) => {
+  try {
+    const profileResult = await pool.query(
+      'SELECT data FROM profile WHERE user_id = $1',
+      [req.userId]
+    );
+    if (profileResult.rows.length === 0) {
+      return res.status(400).json({ error: 'Profil mangler — udfyld vægt, højde, alder og køn først' });
+    }
+    let p = profileResult.rows[0].data;
+    if (typeof p === 'string') { try { p = JSON.parse(p); } catch (e) {} }
+    p = p || {};
+
+    const existingResult = await pool.query(
+      'SELECT * FROM user_goals WHERE user_id = $1',
+      [req.userId]
+    );
+    const existing = existingResult.rows[0] || {};
+
+    const input = {
+      weight_kg: p.weight_kg || p.weight,
+      height_cm: p.height_cm || p.height,
+      age: p.age,
+      gender: p.gender,
+      activity_level: req.body.activity_level || existing.activity_level || p.activity_level,
+      primary_goal: req.body.primary_goal || existing.primary_goal,
+      goal_pace: req.body.goal_pace || existing.goal_pace,
+      plan_type: req.body.plan_type || existing.plan_type,
+      target_weight_kg: req.body.target_weight_kg || existing.target_weight_kg,
+    };
+
+    const calc = calculateTargets(input);
+    if (!calc) {
+      return res.status(400).json({
+        error: 'Profil mangler oplysninger',
+        required: ['weight_kg', 'height_cm', 'age', 'gender'],
+        have: {
+          weight_kg: !!input.weight_kg,
+          height_cm: !!input.height_cm,
+          age: !!input.age,
+          gender: !!input.gender,
+        },
+      });
+    }
+
+    const result = await pool.query(
+      'INSERT INTO user_goals (user_id, primary_goal, target_weight_kg, target_kcal, target_protein_g, target_carbs_g, target_fat_g, plan_type, goal_pace, bmr_kcal, tdee_kcal, calculated_at, updated_at) ' +
+      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW()) ' +
+      'ON CONFLICT (user_id) DO UPDATE SET ' +
+      '  primary_goal = EXCLUDED.primary_goal, ' +
+      '  target_weight_kg = EXCLUDED.target_weight_kg, ' +
+      '  target_kcal = EXCLUDED.target_kcal, ' +
+      '  target_protein_g = EXCLUDED.target_protein_g, ' +
+      '  target_carbs_g = EXCLUDED.target_carbs_g, ' +
+      '  target_fat_g = EXCLUDED.target_fat_g, ' +
+      '  plan_type = EXCLUDED.plan_type, ' +
+      '  goal_pace = EXCLUDED.goal_pace, ' +
+      '  bmr_kcal = EXCLUDED.bmr_kcal, ' +
+      '  tdee_kcal = EXCLUDED.tdee_kcal, ' +
+      '  calculated_at = NOW(), ' +
+      '  updated_at = NOW() ' +
+      'RETURNING *',
+      [
+        req.userId,
+        calc.primary_goal,
+        input.target_weight_kg || null,
+        calc.target_kcal,
+        calc.target_protein_g,
+        calc.target_carbs_g,
+        calc.target_fat_g,
+        calc.plan_type,
+        calc.goal_pace,
+        calc.bmr_kcal,
+        calc.tdee_kcal,
+      ]
+    );
+
+    res.json({
+      ...result.rows[0],
+      calculation: {
+        bmr_kcal: calc.bmr_kcal,
+        tdee_kcal: calc.tdee_kcal,
+        activity_level: calc.activity_level,
+      },
+    });
+  } catch (err) {
+    console.error('Auto-calculate goals error:', err);
+    res.status(500).json({ error: 'Kunne ikke beregne mål' });
+  }
+});
+
+// ─── DAILY SUMMARY ──────────────────────────────────────────────────────
+// GET /daily-summary?date=YYYY-MM-DD - Hent dagens kalorie-balance
+app.get('/daily-summary', authMiddleware, async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+
+    // Kalorier IND fra meals
+    const kcalIn = await pool.query(
+      'SELECT COALESCE(SUM(mi.kcal), 0) AS total, ' +
+      '  COALESCE(SUM(mi.protein_g), 0) AS protein, ' +
+      '  COALESCE(SUM(mi.carbs_g), 0) AS carbs, ' +
+      '  COALESCE(SUM(mi.fat_g), 0) AS fat ' +
+      'FROM meals m JOIN meal_items mi ON mi.meal_id = m.id ' +
+      'WHERE m.user_id = $1 AND DATE(m.eaten_at) = $2',
+      [req.userId, date]
+    );
+
+    // Kalorier UD fra activities-tabellen
+    const kcalOutActivities = await pool.query(
+      "SELECT COALESCE(SUM(calories_kcal), 0) AS total " +
+      "FROM activities WHERE user_id = $1 AND DATE(started_at) = $2",
+      [req.userId, date]
+    );
+
+    // Kalorier UD fra runs-tabellen (NYT — det her var bug'en)
+    const kcalOutRuns = await pool.query(
+      "SELECT COALESCE(SUM(calories), 0) AS total " +
+      "FROM runs WHERE user_id = $1 AND DATE(date) = $2",
+      [req.userId, date]
+    );
+
+    const kcalOutTotal =
+      parseInt(kcalOutActivities.rows[0].total, 10) +
+      parseInt(kcalOutRuns.rows[0].total, 10);
+
+    // Hent brugerens mål (inkl. carbs + fat)
+    const goals = await pool.query(
+      'SELECT target_kcal, target_protein_g, target_carbs_g, target_fat_g ' +
+      'FROM user_goals WHERE user_id = $1',
+      [req.userId]
+    );
+    const target = goals.rows[0] || {
+      target_kcal: null,
+      target_protein_g: null,
+      target_carbs_g: null,
+      target_fat_g: null,
+    };
+
+    const kcalInTotal = parseInt(kcalIn.rows[0].total, 10);
+
+    res.json({
+      date: date,
+      kcal_in: kcalInTotal,
+      kcal_out_activity: kcalOutTotal,
+      protein_g: parseFloat(kcalIn.rows[0].protein),
+      carbs_g: parseFloat(kcalIn.rows[0].carbs),
+      fat_g: parseFloat(kcalIn.rows[0].fat),
+      target_kcal: target.target_kcal,
+      target_protein_g: target.target_protein_g,
+      target_carbs_g: target.target_carbs_g,
+      target_fat_g: target.target_fat_g,
+      // Lifesum-style: tilbage = mål + forbrændt − spist
+      kcal_remaining: target.target_kcal
+        ? (target.target_kcal + kcalOutTotal - kcalInTotal)
+        : null,
+    });
+  } catch (err) {
+    console.error('Daily summary error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente dagsoversigt' });
+  }
+});
+
+registerStrengthEndpoints(app, pool, authMiddleware);
+registerMealPlanEndpoints(app, pool, authMiddleware);
 app.listen(PORT, () => {
-  console.log(`🏃 RunWithAI server kører på port ${PORT}`);
-  console.log(`📦 Version: 3.0.1-revenuecat`);
+  console.log(`ðŸƒ RunWithAI server kÃ¸rer pÃ¥ port ${PORT}`);
+  console.log(`ðŸ“¦ Version: 3.0.1-revenuecat`);
 });
