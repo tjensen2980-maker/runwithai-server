@@ -1422,7 +1422,12 @@ app.post('/chat', authMiddleware, async (req, res) => {
     if (!ANTHROPIC_API_KEY) {
       return res.status(500).json({ error: 'AI coach ikke konfigureret (mangler API nÃ¸gle)' });
     }
-    const { model, max_tokens, system, messages } = req.body;
+const { model, max_tokens, system, messages } = req.body;
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'messages er påkrævet og må ikke være tom' });
+    }
+
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
