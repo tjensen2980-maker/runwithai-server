@@ -2310,11 +2310,15 @@ app.post('/goals/auto', authMiddleware, async (req, res) => {
     );
     const existing = existingResult.rows[0] || {};
 
+    // Map dansk sex til engelsk gender
+    const sexMap = { 'Mand': 'male', 'Kvinde': 'female' };
+    const mappedGender = p.gender || sexMap[p.sex] || p.sex;
+
     const input = {
       weight_kg: p.weight_kg || p.weight,
       height_cm: p.height_cm || p.height,
       age: p.age,
-      gender: p.gender,
+      gender: mappedGender,
       activity_level: req.body.activity_level || existing.activity_level || p.activity_level,
       primary_goal: req.body.primary_goal || existing.primary_goal,
       goal_pace: req.body.goal_pace || existing.goal_pace,
