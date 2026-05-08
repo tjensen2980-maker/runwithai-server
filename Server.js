@@ -1757,21 +1757,28 @@ app.get('/', (req, res) => {
 app.get('/activities', authMiddleware, async (req, res) => {
   try {
     const { type, limit } = req.query;
-    let query = 'SELECT * FROM activities WHERE user_id = $1';
+    let query =
+      'SELECT a.*, ' +
+      '  rd.distance_m AS run_distance_m, rd.avg_pace_sec_per_km, rd.total_ascent_m AS run_ascent_m, ' +
+      '  rd.total_descent_m AS run_descent_m, rd.total_steps, rd.cadence_avg, rd.splits AS run_splits, ' +
+      '  rd.hr_samples AS run_hr_samples, rd.gps_polyline AS run_gps_polyline, ' +
+      '  bd.distance_m AS bike_distance_m, bd.avg_speed_kmh, bd.max_speed_kmh, ' +
+      '  bd.total_ascent_m AS bike_ascent_m, bd.total_descent_m AS bike_descent_m, ' +
+      '  bd.splits AS bike_splits, bd.hr_samples AS bike_hr_samples, bd.gps_polyline AS bike_gps_polyline ' +
+      'FROM activities a ' +
+      'LEFT JOIN activity_run_details rd ON rd.activity_id = a.id ' +
+      'LEFT JOIN activity_bike_details bd ON bd.activity_id = a.id ' +
+      'WHERE a.user_id = $1';
     const params = [req.userId];
-
     if (type) {
-      query += ' AND type = $2';
+      query += ' AND a.type = $2';
       params.push(type);
     }
-
-    query += ' ORDER BY started_at DESC';
-
+    query += ' ORDER BY a.started_at DESC';
     if (limit) {
       query += ' LIMIT $' + (params.length + 1);
       params.push(parseInt(limit, 10));
     }
-
     const result = await pool.query(query, params);
     res.json(result.rows);
   } catch (err) {
@@ -1780,21 +1787,22 @@ app.get('/activities', authMiddleware, async (req, res) => {
   }
 });
 
-// POST /activities - Opret en ny aktivitet
+// POST /activities - Opret en ny aktivitet (med detail-tabel for run/bike)
 app.post('/activities', authMiddleware, async (req, res) => {
+  const client = await pool.connect();
   try {
     const a = req.body;
-
-    // Validering af type
     const validTypes = ['run', 'walk', 'bike', 'strength', 'mobility', 'other'];
     if (!a.type || !validTypes.includes(a.type)) {
       return res.status(400).json({ error: 'Ugyldig aktivitetstype' });
     }
     if (!a.started_at) {
-      return res.status(400).json({ error: 'started_at er pÃ¥krÃ¦vet' });
+      return res.status(400).json({ error: 'started_at er paakraevet' });
     }
 
-    const result = await pool.query(
+    await client.query('BEGIN');
+
+    const actResult = await client.query(
       'INSERT INTO activities (user_id, type, started_at, duration_sec, calories_kcal, avg_hr, max_hr, perceived_effort, notes, source) ' +
       'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *',
       [
@@ -1810,11 +1818,55 @@ app.post('/activities', authMiddleware, async (req, res) => {
         a.source || 'manual'
       ]
     );
+    const activity = actResult.rows[0];
 
-    res.json(result.rows[0]);
+    // Bike-specifikke detaljer
+    if (a.type === 'bike' && (a.distance_m || a.avg_speed_kmh || a.gps_polyline)) {
+      await client.query(
+        'INSERT INTO activity_bike_details (activity_id, distance_m, avg_speed_kmh, max_speed_kmh, total_ascent_m, total_descent_m, splits, hr_samples, gps_polyline) ' +
+        'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+        [
+          activity.id,
+          a.distance_m || null,
+          a.avg_speed_kmh || null,
+          a.max_speed_kmh || null,
+          a.total_ascent_m || null,
+          a.total_descent_m || null,
+          a.splits ? JSON.stringify(a.splits) : null,
+          a.hr_samples ? JSON.stringify(a.hr_samples) : null,
+          a.gps_polyline || null
+        ]
+      );
+    }
+
+    // Run-specifikke detaljer
+    if (a.type === 'run' && (a.distance_m || a.avg_pace_sec_per_km || a.gps_polyline)) {
+      await client.query(
+        'INSERT INTO activity_run_details (activity_id, distance_m, avg_pace_sec_per_km, total_ascent_m, total_descent_m, total_steps, cadence_avg, splits, hr_samples, gps_polyline) ' +
+        'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)',
+        [
+          activity.id,
+          a.distance_m || null,
+          a.avg_pace_sec_per_km || null,
+          a.total_ascent_m || null,
+          a.total_descent_m || null,
+          a.total_steps || null,
+          a.cadence_avg || null,
+          a.splits ? JSON.stringify(a.splits) : null,
+          a.hr_samples ? JSON.stringify(a.hr_samples) : null,
+          a.gps_polyline || null
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json(activity);
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('Create activity error:', err);
     res.status(500).json({ error: 'Kunne ikke gemme aktivitet' });
+  } finally {
+    client.release();
   }
 });
 
