@@ -1,4 +1,4 @@
-﻿-- Cykel-specifikke felter (1:1 med activities hvor type='bike')
+-- Cykel-specifikke felter (1:1 med activities hvor type='bike')
 CREATE TABLE IF NOT EXISTS activity_bike_details (
   activity_id UUID PRIMARY KEY REFERENCES activities(id) ON DELETE CASCADE,
   distance_m INT,
