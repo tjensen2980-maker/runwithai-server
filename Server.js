@@ -1,4 +1,4 @@
-﻿// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SERVER.JS - RunWithAI Backend v3.0.1-revenuecat
 // Med Apple In-App Purchase support
 // Med RevenueCat subscription activate endpoint
@@ -872,7 +872,6 @@ app.post('/runs', authMiddleware, async (req, res) => {
         limit: limitCheck.limit
       });
     }
-    const run = req.body;
     const run = req.body;
     const result = await pool.query(`
       INSERT INTO runs (user_id, date, km, duration, pace, calories, heart_rate, route, notes, type, created_at, running_km, walking_km, max_hr, cadence, total_ascent, total_descent, total_steps, splits, hr_samples)
