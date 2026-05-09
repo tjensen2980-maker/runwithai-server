@@ -481,33 +481,119 @@ app.get('/subscription', authMiddleware, async (req, res) => {
   }
 });
 
+// ─── ACTIVITY LIMIT HELPER (Free tier: 3/week) ────────────────────
+async function checkActivityLimit(userId) {
+  try {
+    // Get user tier
+    const userResult = await pool.query(
+      'SELECT subscription_tier, subscription_status FROM users WHERE id = $1',
+      [userId]
+    );
+    if (userResult.rows.length === 0) {
+      return { allowed: true }; // fail-open
+    }
+    const { subscription_tier, subscription_status } = userResult.rows[0];
+    const isActive = subscription_status === 'active' || subscription_status === 'trialing';
+    const effectiveTier = isActive ? (subscription_tier || 'free') : 'free';
+
+    // Basic and Pro have no limit
+    if (effectiveTier !== 'free') {
+      return { allowed: true };
+    }
+
+    // Free: count activities in last 7 days from BOTH tables
+    const runsResult = await pool.query(
+      "SELECT COUNT(*)::int AS c FROM runs WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '7 days'",
+      [userId]
+    );
+    const actsResult = await pool.query(
+      "SELECT COUNT(*)::int AS c FROM activities WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '7 days'",
+      [userId]
+    );
+    const count = (runsResult.rows[0]?.c || 0) + (actsResult.rows[0]?.c || 0);
+    const limit = 3;
+
+    return {
+      allowed: count < limit,
+      count,
+      limit,
+      tier: effectiveTier
+    };
+  } catch (err) {
+    console.error('checkActivityLimit error:', err);
+    return { allowed: true }; // fail-open on errors
+  }
+}
+
 // â”€â”€â”€ ACTIVATE SUBSCRIPTION (fra RevenueCat) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/subscription/activate', authMiddleware, async (req, res) => {
   try {
-    const { revenueCatId } = req.body;
+    const { revenueCatId, tier } = req.body;
     const userId = req.userId;
 
-    console.log(`[RevenueCat] Activating subscription for user ${userId}, RC ID: ${revenueCatId}`);
+    // Validate tier (default 'pro' for backwards compatibility)
+    const validTier = (tier === 'basic' || tier === 'pro') ? tier : 'pro';
 
-    // Opdater bruger til Pro
-    await pool.query(`
-      UPDATE users 
-      SET subscription_tier = 'pro',
-          subscription_status = 'active',
-          revenuecat_id = $1
-      WHERE id = $2
-    `, [revenueCatId || null, userId]);
+    console.log('[RevenueCat] Activating ' + validTier + ' for user ' + userId + ', RC ID: ' + revenueCatId);
 
-    console.log(`[RevenueCat] User ${userId} upgraded to Pro`);
+    // Opdater bruger til valgt tier
+    await pool.query(
+      'UPDATE users SET subscription_tier = $1, subscription_status = $2, revenuecat_id = $3 WHERE id = $4',
+      [validTier, 'active', revenueCatId || null, userId]
+    );
 
-    res.json({ 
-      success: true, 
-      tier: 'pro',
+    console.log('[RevenueCat] User ' + userId + ' upgraded to ' + validTier);
+
+    res.json({
+      success: true,
+      tier: validTier,
       message: 'Subscription aktiveret'
     });
   } catch (err) {
     console.error('Subscription activate error:', err);
     res.status(500).json({ error: 'Kunne ikke aktivere subscription' });
+  }
+});
+
+// ─── GET USER TIER + FEATURE FLAGS ────────────────────────────────
+app.get('/users/me/tier', authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+    const result = await pool.query(
+      'SELECT subscription_tier, subscription_status FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const row = result.rows[0];
+    const status = row.subscription_status;
+    const rawTier = row.subscription_tier || 'free';
+
+    // If subscription is not active, treat as free
+    const isActive = status === 'active' || status === 'trialing';
+    const tier = isActive ? rawTier : 'free';
+
+    const isPro = tier === 'pro';
+    const isBasic = tier === 'basic' || isPro; // Pro inherits Basic
+    const isFree = tier === 'free';
+
+    res.json({
+      tier,
+      isPro,
+      isBasic,
+      isFree,
+      weeklyActivityLimit: isFree ? 3 : null,
+      canUseMealTracking: isPro,
+      canUseMealPlan: isPro,
+      canUseAICoach: isBasic,
+      canUseAllActivities: isBasic
+    });
+  } catch (err) {
+    console.error('Get tier error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente tier' });
   }
 });
 
@@ -777,6 +863,16 @@ app.get('/runs', authMiddleware, async (req, res) => {
 
 app.post('/runs', authMiddleware, async (req, res) => {
   try {
+    const limitCheck = await checkActivityLimit(req.userId);
+    if (!limitCheck.allowed) {
+      return res.status(403).json({
+        error: 'limit_exceeded',
+        message: 'Du har naaet graensen paa 3 aktiviteter/uge paa Free. Opgrader til Basic eller Pro for ubegraenset.',
+        count: limitCheck.count,
+        limit: limitCheck.limit
+      });
+    }
+    const run = req.body;
     const run = req.body;
     const result = await pool.query(`
       INSERT INTO runs (user_id, date, km, duration, pace, calories, heart_rate, route, notes, type, created_at, running_km, walking_km, max_hr, cadence, total_ascent, total_descent, total_steps, splits, hr_samples)
@@ -1790,7 +1886,17 @@ app.get('/activities', authMiddleware, async (req, res) => {
 // POST /activities - Opret en ny aktivitet (med detail-tabel for run/bike)
 app.post('/activities', authMiddleware, async (req, res) => {
   const client = await pool.connect();
-  try {
+  try { 
+    const limitCheck = await checkActivityLimit(req.userId);
+    if (!limitCheck.allowed) {
+      client.release();
+      return res.status(403).json({
+        error: 'limit_exceeded',
+        message: 'Du har naaet graensen paa 3 aktiviteter/uge paa Free. Opgrader til Basic eller Pro for ubegraenset.',
+        count: limitCheck.count,
+        limit: limitCheck.limit
+      });
+    }
     const a = req.body;
     const validTypes = ['run', 'walk', 'bike', 'strength', 'mobility', 'other'];
     if (!a.type || !validTypes.includes(a.type)) {
