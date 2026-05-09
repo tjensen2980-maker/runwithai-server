@@ -2073,21 +2073,94 @@ app.delete('/meals/:id', authMiddleware, async (req, res) => {
 
 // â”€â”€â”€ FOODS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-// GET /foods/search?q=... - SÃ¸g i food database (lokal cache)
+// GET /foods/search?q=... - Søg i food database (lokal cache + Open Food Facts fallback)
 app.get('/foods/search', authMiddleware, async (req, res) => {
   try {
     const q = (req.query.q || '').trim();
     if (q.length < 2) {
       return res.json([]);
     }
-    const result = await pool.query(
+
+    // Step 1: Sog i lokal cache
+    const localResult = await pool.query(
       'SELECT * FROM foods WHERE LOWER(name) LIKE $1 OR LOWER(brand) LIKE $1 ORDER BY is_verified DESC, name ASC LIMIT 50',
       ['%' + q.toLowerCase() + '%']
     );
-    res.json(result.rows);
+    const localRows = localResult.rows;
+
+    // Hvis vi har mindst 5 lokale resultater, returner dem (ingen OFF-kald)
+    if (localRows.length >= 5) {
+      return res.json(localRows);
+    }
+
+    // Step 2: Fallback til Open Food Facts navne-sogning (DK-prioriteret)
+    let offRows = [];
+    try {
+      const offUrl = 'https://world.openfoodfacts.org/cgi/search.pl?search_terms=' +
+        encodeURIComponent(q) +
+        '&search_simple=1&action=process&json=1&page_size=25&countries_tags_en=denmark';
+      const offRes = await fetch(offUrl, {
+        headers: { 'User-Agent': 'RunWithAI/1.0 (https://runwithai.app)' }
+      });
+      if (offRes.ok) {
+        const offData = await offRes.json();
+        const products = (offData.products || []).filter(function (p) {
+          const n = p.nutriments || {};
+          return n['energy-kcal_100g'] !== undefined && (p.product_name || p.generic_name);
+        });
+
+        // Cache de relevante produkter (max 10) i lokal foods tabel
+        const toCache = products.slice(0, 10);
+        for (let i = 0; i < toCache.length; i++) {
+          const p = toCache[i];
+          const n = p.nutriments || {};
+          const code = p.code || p._id;
+          if (!code) continue;
+          try {
+            const cached = await pool.query(
+              'INSERT INTO foods (source, source_id, name, brand, serving_size_g, kcal_per_100g, protein_g, carbs_g, fat_g, fiber_g, is_verified) ' +
+              'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ' +
+              'ON CONFLICT (source, source_id) DO UPDATE SET ' +
+              '  name = EXCLUDED.name, brand = EXCLUDED.brand, kcal_per_100g = EXCLUDED.kcal_per_100g ' +
+              'RETURNING *',
+              [
+                'openfoodfacts',
+                code,
+                p.product_name || p.generic_name || 'Ukendt produkt',
+                p.brands || null,
+                p.serving_quantity ? parseFloat(p.serving_quantity) : null,
+                n['energy-kcal_100g'] || 0,
+                n.proteins_100g || 0,
+                n.carbohydrates_100g || 0,
+                n.fat_100g || 0,
+                n.fiber_100g || null,
+                false
+              ]
+            );
+            offRows.push(cached.rows[0]);
+          } catch (cacheErr) {
+            console.error('Cache OFF product error:', cacheErr.message);
+          }
+        }
+      }
+    } catch (offErr) {
+      console.error('OFF search error:', offErr.message);
+    }
+
+    // Kombiner: lokale forst, derefter OFF-resultater (uden duplicates)
+    const seen = new Set(localRows.map(function (r) { return r.id; }));
+    const combined = localRows.slice();
+    for (let i = 0; i < offRows.length; i++) {
+      if (!seen.has(offRows[i].id)) {
+        combined.push(offRows[i]);
+        seen.add(offRows[i].id);
+      }
+    }
+
+    res.json(combined);
   } catch (err) {
     console.error('Search foods error:', err);
-    res.status(500).json({ error: 'Kunne ikke sÃ¸ge i fÃ¸devarer' });
+    res.status(500).json({ error: 'Kunne ikke soge i foedevarer' });
   }
 });
 
