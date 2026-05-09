@@ -597,6 +597,56 @@ app.get('/users/me/tier', authMiddleware, async (req, res) => {
   }
 });
 
+// === GET CURRENT USER (email + profile basics) ===
+app.get('/users/me', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, email, subscription_tier, subscription_status FROM users WHERE id = $1',
+      [req.userId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Get user error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente bruger' });
+  }
+});
+
+// === UPDATE USER EMAIL (kraever password-bekraeftelse) ===
+app.put('/users/me/email', authMiddleware, async (req, res) => {
+  try {
+    const { newEmail, password } = req.body;
+    if (!newEmail || !password) {
+      return res.status(400).json({ error: 'newEmail og password er paakraevet' });
+    }
+    const emailLower = String(newEmail).toLowerCase().trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailLower)) {
+      return res.status(400).json({ error: 'Ugyldig email' });
+    }
+    // Hent nuvaerende bruger
+    const userRes = await pool.query('SELECT id, email, password FROM users WHERE id = $1', [req.userId]);
+    if (userRes.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const user = userRes.rows[0];
+    // Verificer password
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) return res.status(401).json({ error: 'Forkert password' });
+    // Tjek om ny email allerede er taget
+    if (emailLower !== user.email) {
+      const existing = await pool.query('SELECT id FROM users WHERE email = $1', [emailLower]);
+      if (existing.rows.length > 0) {
+        return res.status(409).json({ error: 'Email er allerede i brug' });
+      }
+    }
+    // Opdater email
+    await pool.query('UPDATE users SET email = $1 WHERE id = $2', [emailLower, req.userId]);
+    res.json({ success: true, email: emailLower });
+  } catch (err) {
+    console.error('Update email error:', err);
+    res.status(500).json({ error: 'Kunne ikke opdatere email' });
+  }
+});
+
+
 // â”€â”€â”€ APPLE IAP RECEIPT VALIDATION â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app.post('/validate-receipt', authMiddleware, async (req, res) => {
   try {
