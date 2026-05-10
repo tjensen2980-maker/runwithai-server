@@ -582,6 +582,7 @@ app.get('/users/me/tier', authMiddleware, async (req, res) => {
 
     res.json({
       tier,
+      status,
       isPro,
       isBasic,
       isFree,
