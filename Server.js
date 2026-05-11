@@ -2025,6 +2025,97 @@ app.post('/activities', authMiddleware, async (req, res) => {
     client.release();
   }
 });
+// POST /activities/sync-healthkit - Sync workouts fra Apple HealthKit
+app.post('/activities/sync-healthkit', authMiddleware, async (req, res) => {
+  try {
+    const { workouts } = req.body;
+    if (!Array.isArray(workouts)) {
+      return res.status(400).json({ error: 'workouts skal vaere et array' });
+    }
+
+    // Map HealthKit activity type -> vores types
+    const typeMap = {
+      'HKWorkoutActivityTypeRunning': 'run',
+      'Running': 'run',
+      'HKWorkoutActivityTypeWalking': 'walk',
+      'Walking': 'walk',
+      'HKWorkoutActivityTypeCycling': 'bike',
+      'Cycling': 'bike',
+      'HKWorkoutActivityTypeTraditionalStrengthTraining': 'strength',
+      'TraditionalStrengthTraining': 'strength',
+      'HKWorkoutActivityTypeYoga': 'mobility',
+      'Yoga': 'mobility',
+    };
+
+    let inserted = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    for (const w of workouts) {
+      try {
+        if (!w.uuid || !w.start) {
+          skipped++;
+          continue;
+        }
+
+        const externalId = 'hk_' + w.uuid;
+        const mappedType = typeMap[w.activityName] || typeMap[w.type] || 'other';
+
+        // Tjek om allerede synket
+        const existing = await pool.query(
+          'SELECT id FROM activities WHERE user_id = $1 AND external_id = $2',
+          [req.userId, externalId]
+        );
+        if (existing.rows.length > 0) {
+          skipped++;
+          continue;
+        }
+
+        const duration = w.duration ? Math.round(Number(w.duration)) : null;
+        const calories = w.calories ? Math.round(Number(w.calories)) : null;
+        const distance = w.distance ? Math.round(Number(w.distance)) : null;
+
+        const actRes = await pool.query(
+          'INSERT INTO activities (user_id, type, started_at, duration_sec, calories_kcal, notes, source, external_id) ' +
+          'VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id',
+          [
+            req.userId,
+            mappedType,
+            w.start,
+            duration,
+            calories,
+            'Synkroniseret fra Apple Health',
+            'healthkit',
+            externalId,
+          ]
+        );
+
+        // Hvis run eller bike, gem distance i detail-tabellen
+        if ((mappedType === 'run' || mappedType === 'bike') && distance) {
+          const detailTable = mappedType === 'run' ? 'activity_run_details' : 'activity_bike_details';
+          try {
+            await pool.query(
+              'INSERT INTO ' + detailTable + ' (activity_id, distance_m) VALUES ($1, $2)',
+              [actRes.rows[0].id, distance]
+            );
+          } catch (de) {
+            console.warn('Could not insert detail for', externalId, de.message);
+          }
+        }
+
+        inserted++;
+      } catch (e) {
+        console.error('Sync workout error:', e.message);
+        errors++;
+      }
+    }
+
+    res.json({ inserted, skipped, errors, total: workouts.length });
+  } catch (err) {
+    console.error('sync-healthkit error:', err);
+    res.status(500).json({ error: 'HealthKit sync fejlede' });
+  }
+});
 
 // â”€â”€â”€ EXERCISES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
