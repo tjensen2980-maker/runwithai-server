@@ -2419,61 +2419,111 @@ app.get('/foods/barcode/:ean', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Ugyldig stregkode' });
     }
 
-    // Tjek fÃ¸rst lokal cache
+    // Tjek først lokal cache
     const cached = await pool.query(
-      "SELECT * FROM foods WHERE source = 'openfoodfacts' AND source_id = $1",
+      "SELECT * FROM foods WHERE (source = 'openfoodfacts' OR source = 'usda') AND source_id = $1 LIMIT 1",
       [ean]
     );
     if (cached.rows.length > 0) {
       return res.json(cached.rows[0]);
     }
 
-    // Hent fra Open Food Facts
-    const off = await fetch('https://world.openfoodfacts.org/api/v2/product/' + ean + '.json');
-    if (!off.ok) {
-      return res.status(404).json({ error: 'Produkt ikke fundet' });
+    // Helper: cache et opslag i foods tabel
+    async function cacheFood(sourceName, code, name, brand, servingG, kcal, protein, carbs, fat, fiber) {
+      try {
+        const ins = await pool.query(
+          'INSERT INTO foods (source, source_id, name, brand, serving_size_g, kcal_per_100g, protein_g, carbs_g, fat_g, fiber_g, is_verified) ' +
+          'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ' +
+          'ON CONFLICT (source, source_id) DO UPDATE SET ' +
+          '  name = EXCLUDED.name, brand = EXCLUDED.brand, kcal_per_100g = EXCLUDED.kcal_per_100g ' +
+          'RETURNING *',
+          [sourceName, code, name, brand, servingG, kcal, protein, carbs, fat, fiber, false]
+        );
+        return ins.rows[0];
+      } catch (e) {
+        console.error('cacheFood error:', e.message);
+        return null;
+      }
     }
-    const data = await off.json();
-    if (data.status !== 1 || !data.product) {
-      return res.status(404).json({ error: 'Produkt ikke fundet' });
+
+    // Trin 1: Open Food Facts
+    try {
+      const offRes = await fetch('https://world.openfoodfacts.org/api/v2/product/' + ean + '.json');
+      if (offRes.ok) {
+        const offData = await offRes.json();
+        if (offData && offData.product) {
+          const p = offData.product;
+          const n = p.nutriments || {};
+          if (n['energy-kcal_100g'] !== undefined) {
+            const cached2 = await cacheFood(
+              'openfoodfacts',
+              ean,
+              p.product_name || p.generic_name || 'Ukendt produkt',
+              p.brands || null,
+              p.serving_quantity ? parseFloat(p.serving_quantity) : null,
+              n['energy-kcal_100g'] || 0,
+              n.proteins_100g || 0,
+              n.carbohydrates_100g || 0,
+              n.fat_100g || 0,
+              n.fiber_100g || null
+            );
+            if (cached2) return res.json(cached2);
+          }
+        }
+      }
+    } catch (offErr) {
+      console.error('OFF lookup error:', offErr.message);
     }
 
-    const p = data.product;
-    const nutriments = p.nutriments || {};
-
-    if (nutriments['energy-kcal_100g'] === undefined) {
-      return res.status(404).json({ error: 'ErnÃ¦ringsdata mangler for dette produkt' });
+    // Trin 2: USDA FoodData Central (fallback)
+    const usdaKey = process.env.USDA_API_KEY;
+    if (usdaKey) {
+      try {
+        const usdaUrl = 'https://api.nal.usda.gov/fdc/v1/foods/search?query=' + encodeURIComponent(ean) +
+          '&dataType=Branded&pageSize=5&api_key=' + usdaKey;
+        const usdaRes = await fetch(usdaUrl);
+        if (usdaRes.ok) {
+          const usdaData = await usdaRes.json();
+          const foods = (usdaData && usdaData.foods) || [];
+          const match = foods.find(function (f) {
+            const g = (f.gtinUpc || '').replace(/[^0-9]/g, '');
+            return g === ean || g === ('0' + ean) || ean === ('0' + g);
+          }) || (foods.length > 0 ? foods[0] : null);
+          if (match) {
+            const nutrMap = {};
+            (match.foodNutrients || []).forEach(function (fn) {
+              const id = fn.nutrientId || (fn.nutrient && fn.nutrient.id);
+              if (id) nutrMap[id] = fn.value || (fn.amount || 0);
+            });
+            const kcal = nutrMap[1008] || 0;
+            if (kcal > 0) {
+              const cached3 = await cacheFood(
+                'usda',
+                ean,
+                match.description || 'Ukendt produkt',
+                match.brandOwner || match.brandName || null,
+                match.servingSize || null,
+                kcal,
+                nutrMap[1003] || 0,
+                nutrMap[1005] || 0,
+                nutrMap[1004] || 0,
+                nutrMap[1079] || null
+              );
+              if (cached3) return res.json(cached3);
+            }
+          }
+        }
+      } catch (usdaErr) {
+        console.error('USDA lookup error:', usdaErr.message);
+      }
     }
 
-    // Cache i vores database
-    const inserted = await pool.query(
-      'INSERT INTO foods (source, source_id, name, brand, serving_size_g, kcal_per_100g, protein_g, carbs_g, fat_g, fiber_g, is_verified) ' +
-      'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ' +
-      'ON CONFLICT (source, source_id) DO UPDATE SET ' +
-      '  name = EXCLUDED.name, brand = EXCLUDED.brand, kcal_per_100g = EXCLUDED.kcal_per_100g ' +
-      'RETURNING *',
-      [
-        'openfoodfacts',
-        ean,
-        p.product_name || p.generic_name || 'Ukendt produkt',
-        p.brands || null,
-        p.serving_quantity ? parseFloat(p.serving_quantity) : null,
-        nutriments['energy-kcal_100g'] || 0,
-        nutriments.proteins_100g || 0,
-        nutriments.carbohydrates_100g || 0,
-        nutriments.fat_100g || 0,
-        nutriments.fiber_100g || null,
-        false
-      ]
-    );
-
-    res.json(inserted.rows[0]);
+    return res.status(404).json({ error: 'Produkt ikke fundet' });
   } catch (err) {
     console.error('Barcode lookup error:', err);
-    res.status(500).json({ error: 'Kunne ikke slÃ¥ stregkode op' });
+    res.status(500).json({ error: 'Kunne ikke slå stregkode op' });
   }
 });
-
 // POST /foods/analyze-photo - AI-analyse af madbillede via Claude Vision
 app.post('/foods/analyze-photo', authMiddleware, async (req, res) => {
   try {
