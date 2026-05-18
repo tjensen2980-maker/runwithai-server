@@ -2406,6 +2406,55 @@ app.get('/foods/search', authMiddleware, async (req, res) => {
       }
     }
 
+    
+    // ==== Trin 3: OpenAI fritekst-fallback (kun hvis ingen lokale + ingen OFF-resultater) ====
+    if (combined.length === 0 && process.env.OPENAI_API_KEY) {
+      try {
+        const aiPrompt = `Du er en ekspert i dansk og international fodevarer-naeringsindhold. Estimer naeringsindhold per 100 gram for: "${q}". Returner KUN gyldig JSON i dette format uden markdown-blok:
+{"name":"<navn på dansk>","kcal_per_100g":<tal>,"protein_g":<tal>,"carbs_g":<tal>,"fat_g":<tal>,"fiber_g":<tal>,"serving_size_g":<typisk portion i gram>}
+Hvis du ikke kan identificere fodevaren, returner: {"error":"unknown"}`;
+        const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'user', content: aiPrompt }],
+            max_tokens: 200,
+            temperature: 0.3,
+            response_format: { type: 'json_object' },
+          }),
+        });
+        if (aiRes.ok) {
+          const aiData = await aiRes.json();
+          const aiText = aiData.choices && aiData.choices[0] && aiData.choices[0].message && aiData.choices[0].message.content;
+          if (aiText) {
+            const parsed = JSON.parse(aiText);
+            if (!parsed.error && parsed.name && typeof parsed.kcal_per_100g === 'number') {
+              const aiId = 'ai_' + q.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 60);
+              const cached = await cacheFood(
+                'openai',
+                aiId,
+                parsed.name,
+                null,
+                parsed.serving_size_g || 100,
+                parsed.kcal_per_100g,
+                parsed.protein_g || 0,
+                parsed.carbs_g || 0,
+                parsed.fat_g || 0,
+                parsed.fiber_g || 0
+              );
+              if (cached) combined.push(cached);
+            }
+          }
+        }
+      } catch (aiErr) {
+        console.error('OpenAI search fallback error:', aiErr.message);
+      }
+    }
+
     res.json(combined);
   } catch (err) {
     console.error('Search foods error:', err);
