@@ -2220,7 +2220,7 @@ app.get('/meals', authMiddleware, async (req, res) => {
       'SELECT m.*, ' +
       '  COALESCE(json_agg(json_build_object(' +
       '    \'id\', mi.id, \'food_id\', mi.food_id, \'amount_g\', mi.amount_g, ' +
-      '    \'kcal\', mi.kcal, \'protein_g\', mi.protein_g, \'carbs_g\', mi.carbs_g, \'fat_g\', mi.fat_g, ' +
+      '    \'kcal\', mi.kcal, \'protein_g\', mi.protein_g, \'carbs_g\', mi.carbs_g, \'fat_g\', mi.fat_g, \'amount\', mi.amount, \'unit\', mi.unit, ' +
       '    \'food_name\', f.name, \'food_brand\', f.brand' +
       '  )) FILTER (WHERE mi.id IS NOT NULL), \'[]\') AS items ' +
       'FROM meals m ' +
@@ -2274,8 +2274,8 @@ app.post('/meals', authMiddleware, async (req, res) => {
         return res.status(400).json({ error: 'Hvert item skal have amount_g og kcal' });
       }
       const itemResult = await client.query(
-        'INSERT INTO meal_items (meal_id, food_id, amount_g, kcal, protein_g, carbs_g, fat_g) ' +
-        'VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+        'INSERT INTO meal_items (meal_id, food_id, amount_g, kcal, protein_g, carbs_g, fat_g, amount, unit) ' +
+        'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *',
         [
           meal.id,
           item.food_id || null,
@@ -2284,6 +2284,8 @@ app.post('/meals', authMiddleware, async (req, res) => {
           item.protein_g || 0,
           item.carbs_g || 0,
           item.fat_g || 0
+          item.amount || null,
+          item.unit || null,
         ]
       );
       insertedItems.push(itemResult.rows[0]);
