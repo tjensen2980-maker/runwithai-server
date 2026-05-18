@@ -2463,6 +2463,246 @@ Hvis du ikke kan identificere fodevaren, returner: {"error":"unknown"}`;
 });
 
 // GET /foods/barcode/:ean - SlÃ¥ produkt op via stregkode (Open Food Facts)
+
+// POST /admin/seed-basics - Seed Danish basic foods (Frida-based) - admin only
+app.post('/admin/seed-basics', async (req, res) => {
+  try {
+    const auth = req.headers.authorization || '';
+    const token = auth.replace(/^Bearer\s+/, '').trim();
+    if (!process.env.ADMIN_TOKEN || token !== process.env.ADMIN_TOKEN) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+  const FRIDA_BASICS = [
+    ["Kyllingebryst (rå)",110,23.1,0,1.5,0,150],
+    ["Kyllingelår (rå)",165,18.5,0,9.8,0,130],
+    ["Kylling stegt med skind",215,25,0,12,0,130],
+    ["Hakket oksekød 8-12%",175,20,0,10,0,125],
+    ["Hakket oksekød 4-7%",135,21,0,5,0,125],
+    ["Oksefilet (rå)",130,22,0,4,0,150],
+    ["Hakket svinekød 8-12%",195,19,0,13,0,125],
+    ["Hakket kalkun",130,22,0,4,0,125],
+    ["Svinekam uden fedt",130,22,0,4.5,0,150],
+    ["Bacon stegt",540,37,1.4,42,0,30],
+    ["Hamburgerryg",110,21,0.5,2.5,0,50],
+    ["Skinke, kogt",110,20,0.5,3,0,30],
+    ["Spegepølse",380,22,1,32,0,25],
+    ["Leverpostej",280,11,4,24,0,20],
+    ["Frikadelle (stegt)",220,16,8,14,1,80],
+    ["Medisterpølse stegt",270,13,6,22,0.5,100],
+    ["Laks (rå)",200,20,0,13,0,150],
+    ["Laks (røget)",165,23,0,8,0,50],
+    ["Torsk (rå)",76,17.5,0,0.5,0,150],
+    ["Sild (marineret)",200,14,6,13,0,50],
+    ["Makrel i tomat",195,13,4,14,0.5,75],
+    ["Tun i vand (dåse)",110,25,0,1,0,60],
+    ["Tun i olie (dåse)",195,24,0,11,0,60],
+    ["Rejer (kogte)",100,22,0.5,1.2,0,50],
+    ["Fiskefrikadelle",195,14,12,10,1,75],
+    ["Æg (helt)",145,12.5,0.7,10,0,60],
+    ["Æggehvide",50,11,0.7,0.2,0,35],
+    ["Æggeblomme",320,16,3.6,27,0,18],
+    ["Sødmælk 3.5%",64,3.4,4.7,3.5,0,200],
+    ["Letmælk 1.5%",47,3.4,4.8,1.5,0,200],
+    ["Minimælk 0.4%",36,3.4,4.9,0.4,0,200],
+    ["Skummetmælk 0.1%",33,3.5,5,0.1,0,200],
+    ["Kaerneamælk",38,3.4,4,0.5,0,200],
+    ["A38 letmælk",56,4,5.5,1.5,0,150],
+    ["Yoghurt naturel 1.5%",60,5,5.5,1.5,0,150],
+    ["Skyr naturel",65,11,4,0.2,0,150],
+    ["Skyr vanilje",75,10,8,0.2,0,150],
+    ["Cottage cheese",100,13,3,4,0,100],
+    ["Hytteost 1.5%",80,13,3,1.5,0,100],
+    ["Kvark naturel 0.2%",60,12,4,0.2,0,150],
+    ["Cremefraiche 18%",195,2.5,4,18,0,30],
+    ["Cremefraiche 9%",115,3,4.5,9,0,30],
+    ["Cremefraiche 38%",360,2.2,3,38,0,20],
+    ["Piskefløde 38%",360,2,3,38,0,100],
+    ["Madlavningsfløde 18%",195,2.5,4,18,0,100],
+    ["Smør",745,0.6,0.7,82,0,10],
+    ["Margarine 80%",720,0.2,0.5,80,0,10],
+    ["Minarine 40%",360,0.3,0.6,40,0,10],
+    ["Cheddar ost",405,25,1,33,0,25],
+    ["Danbo 30+ ost",285,26,0,20,0,25],
+    ["Danbo 45+ ost",360,24,0,29,0,25],
+    ["Mozzarella",250,18,2,19,0,30],
+    ["Feta",265,14,1,23,0,30],
+    ["Parmesan",410,36,4,28,0,10],
+    ["Flødeost (Philadelphia)",250,6,4,23,0,20],
+    ["Brieost",335,21,0.5,28,0,30],
+    ["Rugbrød",235,8,40,2.5,7,30],
+    ["Franskbrød",270,9,50,3,3,30],
+    ["Bagerbrød (groft)",245,10,42,4,6,40],
+    ["Knækbrød (rug)",320,11,65,1.5,14,10],
+    ["Knækbrød (havre)",380,12,60,10,7,10],
+    ["Toastbrød",280,9,50,4,3,30],
+    ["Pita brød",275,9,55,1,2,60],
+    ["Tortilla wrap",305,9,50,7,2,50],
+    ["Boller (hvede)",290,10,52,5,3,60],
+    ["Croissant",410,8,45,22,2,50],
+    ["Havregryn (tørre)",370,13,60,7,10,40],
+    ["Havregrød (med vand)",60,2.5,10,1,1.6,250],
+    ["Müsli (med tørret frugt)",360,9,65,7,7,50],
+    ["Cornflakes",380,7,84,1,3,30],
+    ["Cheerios",380,9,76,5,7,30],
+    ["Risflakes",380,6,85,1,1,30],
+    ["Ris (kogte)",130,2.6,28,0.3,0.4,200],
+    ["Basmati ris (kogte)",135,3,29,0.4,0.4,200],
+    ["Brune ris (kogte)",125,2.6,26,1,1.8,200],
+    ["Pasta (kogt)",130,5,25,1,1.5,200],
+    ["Fuldkornspasta (kogt)",125,5.3,23,1.4,4,200],
+    ["Kartoffel (kogt)",75,2,17,0.1,1.5,200],
+    ["Kartoffel (bagt)",95,2.5,21,0.1,2.2,200],
+    ["Pommes frites",270,4,35,13,3,150],
+    ["Søde kartofler",90,2,20,0.1,3,200],
+    ["Bulgur (kogt)",85,3,19,0.3,4.5,150],
+    ["Quinoa (kogt)",120,4.4,21,1.9,2.8,150],
+    ["Couscous (kogt)",115,3.8,23,0.2,1.4,150],
+    ["Bønner (hvide, kogte)",130,9,20,0.5,7,100],
+    ["Kidneybønner (kogte)",130,8.7,22,0.5,6.4,100],
+    ["Kikærter (kogte)",165,9,27,2.6,7.6,100],
+    ["Linser (kogte)",115,9,20,0.4,8,100],
+    ["Æble",50,0.3,11,0.2,2.5,150],
+    ["Banan",90,1.1,20,0.3,2.6,120],
+    ["Appelsin",45,0.9,9,0.1,2.4,150],
+    ["Pære",55,0.4,13,0.1,3.1,150],
+    ["Vindrue",70,0.7,17,0.2,0.9,100],
+    ["Jordbær",32,0.7,6,0.3,2,100],
+    ["Blåbær",57,0.7,12,0.3,2.4,100],
+    ["Hindbær",53,1.2,9,0.7,6.5,100],
+    ["Brombær",43,1.4,5,0.5,5.3,100],
+    ["Kirsebær",63,1.1,14,0.2,2.1,100],
+    ["Blomme",46,0.7,10,0.3,1.4,60],
+    ["Fersken",39,0.9,8,0.3,1.5,150],
+    ["Nektarin",44,1.1,9,0.3,1.7,150],
+    ["Abrikos",48,1.4,9,0.4,2,50],
+    ["Ananas",50,0.5,11,0.1,1.4,150],
+    ["Melon (cantaloupe)",34,0.8,8,0.2,0.9,150],
+    ["Vandmelon",30,0.6,7.5,0.2,0.4,200],
+    ["Kiwi",61,1.1,12,0.5,3,70],
+    ["Mango",60,0.8,13,0.4,1.6,150],
+    ["Avocado",160,2,9,15,7,80],
+    ["Citron",29,1.1,6,0.3,2.8,50],
+    ["Lime",30,0.7,7.7,0.2,2.8,50],
+    ["Grapefrugt",42,0.8,8.4,0.1,1.6,150],
+    ["Rosiner",300,3,70,0.5,4,25],
+    ["Dadler",280,2.5,70,0.4,7,25],
+    ["Tørrede abrikoser",240,3.4,55,0.5,7.3,25],
+    ["Tomat",18,0.9,3.5,0.2,1.2,100],
+    ["Cherrytomat",19,1,3.6,0.2,1.2,100],
+    ["Agurk",16,0.7,3.6,0.1,0.5,100],
+    ["Salat (iceberg)",14,0.9,2.9,0.1,1.2,50],
+    ["Spinat",23,2.9,3.6,0.4,2.2,80],
+    ["Grønkål",50,3.3,9,0.7,4,80],
+    ["Bønnespirer",30,3,6,0.2,1.8,50],
+    ["Broccoli",34,2.8,7,0.4,2.6,100],
+    ["Blomkål",25,2,5,0.3,2,100],
+    ["Gulerod",41,0.9,10,0.2,2.8,80],
+    ["Rødløg",42,1.1,10,0.1,1.7,50],
+    ["Løg",40,1.1,9,0.1,1.7,50],
+    ["Hvidløg",149,6.4,33,0.5,2.1,5],
+    ["Porre",31,1.5,7,0.3,1.8,100],
+    ["Selleri",16,0.7,3,0.2,1.6,50],
+    ["Champignon",22,3.1,3.3,0.3,1,100],
+    ["Peberfrugt (rød)",31,1,6,0.3,2.1,100],
+    ["Peberfrugt (grøn)",20,0.9,4.6,0.2,1.7,100],
+    ["Squash (zucchini)",17,1.2,3.1,0.3,1,150],
+    ["Aubergine",25,1,6,0.2,3,150],
+    ["Majs (dåse)",85,3,18,1,2.4,100],
+    ["Ærter (frosne)",80,5.5,14,0.4,5.7,80],
+    ["Asparges",20,2.2,3.9,0.1,2.1,100],
+    ["Rødkål",31,1.4,7.4,0.2,2.1,80],
+    ["Hvidkål",25,1.3,5.8,0.1,2.5,80],
+    ["Rødbede",43,1.6,10,0.2,2.8,100],
+    ["Pastinak",75,1.2,18,0.3,5,100],
+    ["Persille",36,3,6,0.8,3.3,5],
+    ["Bønner (grønne)",31,1.8,7,0.2,2.7,100],
+    ["Mandel",580,21,22,50,12,25],
+    ["Valnød",655,15,14,65,6.7,25],
+    ["Hasselnød",630,15,17,61,9.7,25],
+    ["Cashewnød",555,18,30,44,3.3,25],
+    ["Peanut (jordnød)",570,26,16,49,8.5,25],
+    ["Peanutbutter",590,25,20,50,6,20],
+    ["Pistacie",560,20,28,45,10,25],
+    ["Solsikkekerner",580,21,20,51,8.6,20],
+    ["Græskarkerner",560,30,11,49,6,20],
+    ["Chiafrø",490,17,42,31,34,15],
+    ["Hørfrø",535,18,29,42,27,15],
+    ["Sesamfrø",575,18,23,50,12,10],
+    ["Olivenolie",880,0,0,100,0,10],
+    ["Rapsolie",880,0,0,100,0,10],
+    ["Solsikkeolie",880,0,0,100,0,10],
+    ["Kokosolie",890,0,0,100,0,10],
+    ["Mayonnaise",680,1,1.5,75,0,15],
+    ["Light mayonnaise",250,1,6,25,0,15],
+    ["Ketchup",100,1.2,23,0.2,0.4,15],
+    ["Sennep",70,4,6,4,3,5],
+    ["Soya sauce",60,8,6,0,0.8,10],
+    ["Eddikedressing",80,0.4,8,5,0,10],
+    ["Vand",0,0,0,0,0,250],
+    ["Kaffe (sort, uden mælk)",2,0.3,0,0,0,200],
+    ["Te (uden mælk)",1,0.1,0,0,0,200],
+    ["Appelsinjuice",45,0.7,10,0.2,0.2,200],
+    ["Æblejuice",46,0.1,11,0.1,0.2,200],
+    ["Cola",42,0,11,0,0,330],
+    ["Cola Zero",0.5,0,0.1,0,0,330],
+    ["Faxe Kondi",41,0,10,0,0,330],
+    ["Sodavand (klassisk)",42,0,11,0,0,330],
+    ["Pilsner øl 4.6%",43,0.4,3.5,0,0,330],
+    ["Rødvin",85,0.1,2.6,0,0,150],
+    ["Hvidvin",82,0.1,2.6,0,0,150],
+    ["Vodka",235,0,0,0,0,40],
+    ["Mørk chokolade 70%",580,8,30,42,11,20],
+    ["Mælkechokolade",535,7.5,58,30,3,20],
+    ["Honning",305,0.3,80,0,0.2,15],
+    ["Sukker",405,0,100,0,0,5],
+    ["Brun farin",380,0.1,98,0,0,5],
+    ["Marmelade",250,0.3,60,0.1,1,15],
+    ["Nutella",540,6,57,31,4,15],
+    ["Lakrids",360,1.5,87,0.5,0,20],
+    ["Vingummi",350,6,80,0,0,20],
+    ["Chips (saltede)",540,6,53,33,4.4,30],
+    ["Popcorn (luftpoppet)",380,12,78,4.5,14,20],
+    ["Is (vanilje)",200,3.5,24,10,0.5,80],
+    ["Småkager",470,6,65,21,2,20],
+    ["Hummus",165,8,14,9,6,30],
+    ["Tofu",78,8,1.9,4.8,0.3,100],
+    ["Sojamælk",33,3.3,0.6,1.8,0.6,200],
+    ["Havremælk",47,1,7.5,1.5,1.4,200],
+    ["Mandelmælk",14,0.5,0.3,1.1,0.2,200]
+  ];
+
+    let inserted = 0;
+    let skipped = 0;
+    for (const row of FRIDA_BASICS) {
+      const [name, kcal, protein, carbs, fat, fiber, serving] = row;
+      try {
+        const existing = await pool.query(
+          "SELECT id FROM foods WHERE source = 'frida' AND name = $1 LIMIT 1",
+          [name]
+        );
+        if (existing.rows.length > 0) {
+          skipped++;
+          continue;
+        }
+        const sourceId = 'frida_' + name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 80);
+        await pool.query(
+          'INSERT INTO foods (source, source_id, name, brand, serving_size_g, kcal_per_100g, protein_g, carbs_g, fat_g, fiber_g, is_verified) ' +
+          'VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)',
+          ['frida', sourceId, name, null, serving, kcal, protein, carbs, fat, fiber, true]
+        );
+        inserted++;
+      } catch (rowErr) {
+        console.error('Seed row error for', name, ':', rowErr.message);
+      }
+    }
+    res.json({ ok: true, total: FRIDA_BASICS.length, inserted, skipped });
+  } catch (err) {
+    console.error('Seed basics error:', err);
+    res.status(500).json({ error: 'seed failed' });
+  }
+});
+
 app.get('/foods/barcode/:ean', authMiddleware, async (req, res) => {
   try {
     const ean = req.params.ean.replace(/[^0-9]/g, '');
