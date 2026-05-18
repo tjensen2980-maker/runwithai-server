@@ -2283,7 +2283,7 @@ app.post('/meals', authMiddleware, async (req, res) => {
           item.kcal,
           item.protein_g || 0,
           item.carbs_g || 0,
-          item.fat_g || 0
+          item.fat_g || 0,
           item.amount || null,
           item.unit || null,
         ]
