@@ -2653,6 +2653,56 @@ app.get('/admin/health-check', async (req, res) => {
       result.errors.push('recent_favorites: ' + e.message);
     }
 
+    // Test the actual queries that fail
+    try {
+      const favQuery = await pool.query(
+        `SELECT f.id, f.source, f.source_id, f.name, f.brand, f.serving_size_g,
+                f.kcal_per_100g, f.protein_g, f.carbs_g, f.fat_g, f.fiber_g, f.is_verified,
+                uf.last_amount, uf.last_unit, uf.created_at AS favorited_at
+           FROM user_favorites uf
+           JOIN foods f ON f.id = uf.food_id
+          WHERE uf.user_id = $1
+          ORDER BY uf.created_at DESC`,
+        [1]
+      );
+      result.test_favorites_query = { ok: true, rows: favQuery.rows.length };
+    } catch (e) {
+      result.test_favorites_query = { ok: false, error: e.message, code: e.code, detail: e.detail };
+    }
+
+    try {
+      const foodCols = await pool.query(
+        "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='foods' ORDER BY column_name"
+      );
+      result.foods_columns = foodCols.rows.map(r => r.column_name);
+    } catch (e) {
+      result.foods_columns = 'ERR: ' + e.message;
+    }
+
+    try {
+      const end = new Date().toISOString().slice(0,10);
+      const start = new Date(Date.now() - 6*24*60*60*1000).toISOString().slice(0,10);
+      const mealQuery = await pool.query(
+        `SELECT DATE(eaten_at) AS day, SUM(kcal)::int AS kcal
+           FROM meals
+          WHERE user_id = $1 AND eaten_at >= $2 AND eaten_at < ($3::date + INTERVAL '1 day')
+          GROUP BY day ORDER BY day`,
+        [1, start, end]
+      );
+      result.test_summary_meals = { ok: true, rows: mealQuery.rows };
+    } catch (e) {
+      result.test_summary_meals = { ok: false, error: e.message, code: e.code, detail: e.detail };
+    }
+
+    try {
+      const mealCols = await pool.query(
+        "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='meals' ORDER BY column_name"
+      );
+      result.meals_columns = mealCols.rows.map(r => r.column_name);
+    } catch (e) {
+      result.meals_columns = 'ERR: ' + e.message;
+    }
+
     res.json(result);
   } catch (err) {
     console.error('health-check error:', err);
