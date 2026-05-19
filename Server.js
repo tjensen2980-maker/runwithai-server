@@ -2320,6 +2320,132 @@ app.delete('/meals/:id', authMiddleware, async (req, res) => {
   }
 });
 
+// ════════════════════════════════ FAVORITES & HISTORY ════════════════════════════════
+async function initFavoritesTable() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS user_favorites (
+        user_id INTEGER NOT NULL,
+        food_id INTEGER NOT NULL,
+        last_amount NUMERIC,
+        last_unit TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, food_id)
+      )
+    `);
+    console.log('user_favorites table ready');
+  } catch (err) {
+    console.error('initFavoritesTable error:', err.message);
+  }
+}
+
+// GET /meals/recent - sidste 20 unikke fødevarer brugeren har logget
+app.get('/meals/recent', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT DISTINCT ON (mi.food_id)
+         f.id, f.source, f.source_id, f.name, f.brand, f.serving_size_g,
+         f.kcal_per_100g, f.protein_g, f.carbs_g, f.fat_g, f.fiber_g, f.is_verified,
+         mi.amount AS last_amount, mi.unit AS last_unit,
+         m.eaten_at AS last_eaten_at
+       FROM meal_items mi
+       JOIN meals m ON m.id = mi.meal_id
+       JOIN foods f ON f.id = mi.food_id
+       WHERE m.user_id = $1
+       ORDER BY mi.food_id, m.eaten_at DESC
+       LIMIT 20`,
+      [req.userId]
+    );
+    // Sort by last_eaten_at DESC after DISTINCT ON
+    const sorted = result.rows.sort((a, b) => new Date(b.last_eaten_at) - new Date(a.last_eaten_at));
+    res.json(sorted);
+  } catch (err) {
+    console.error('GET /meals/recent error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente seneste maaltider' });
+  }
+});
+
+// GET /meals/frequent - top 10 hyppigst loggede sidste 30 dage
+app.get('/meals/frequent', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT f.id, f.source, f.source_id, f.name, f.brand, f.serving_size_g,
+              f.kcal_per_100g, f.protein_g, f.carbs_g, f.fat_g, f.fiber_g, f.is_verified,
+              COUNT(*) AS log_count,
+              MAX(m.eaten_at) AS last_eaten_at,
+              (ARRAY_AGG(mi.amount ORDER BY m.eaten_at DESC))[1] AS last_amount,
+              (ARRAY_AGG(mi.unit ORDER BY m.eaten_at DESC))[1] AS last_unit
+       FROM meal_items mi
+       JOIN meals m ON m.id = mi.meal_id
+       JOIN foods f ON f.id = mi.food_id
+       WHERE m.user_id = $1
+         AND m.eaten_at >= NOW() - INTERVAL '30 days'
+       GROUP BY f.id
+       ORDER BY log_count DESC, last_eaten_at DESC
+       LIMIT 10`,
+      [req.userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /meals/frequent error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente hyppige maaltider' });
+  }
+});
+
+// GET /favorites - alle brugerens favoritter
+app.get('/favorites', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT f.id, f.source, f.source_id, f.name, f.brand, f.serving_size_g,
+              f.kcal_per_100g, f.protein_g, f.carbs_g, f.fat_g, f.fiber_g, f.is_verified,
+              uf.last_amount, uf.last_unit, uf.created_at AS favorited_at
+       FROM user_favorites uf
+       JOIN foods f ON f.id = uf.food_id
+       WHERE uf.user_id = $1
+       ORDER BY uf.created_at DESC`,
+      [req.userId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /favorites error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente favoritter' });
+  }
+});
+
+// POST /favorites/:foodId - tilfoej til favoritter
+app.post('/favorites/:foodId', authMiddleware, async (req, res) => {
+  try {
+    const foodId = parseInt(req.params.foodId, 10);
+    if (!foodId) return res.status(400).json({ error: 'Ugyldigt food id' });
+    const { last_amount, last_unit } = req.body || {};
+    await pool.query(
+      `INSERT INTO user_favorites (user_id, food_id, last_amount, last_unit)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, food_id)
+       DO UPDATE SET last_amount = EXCLUDED.last_amount, last_unit = EXCLUDED.last_unit`,
+      [req.userId, foodId, last_amount || null, last_unit || null]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('POST /favorites error:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme favorit' });
+  }
+});
+
+// DELETE /favorites/:foodId - fjern favorit
+app.delete('/favorites/:foodId', authMiddleware, async (req, res) => {
+  try {
+    const foodId = parseInt(req.params.foodId, 10);
+    if (!foodId) return res.status(400).json({ error: 'Ugyldigt food id' });
+    await pool.query('DELETE FROM user_favorites WHERE user_id = $1 AND food_id = $2', [req.userId, foodId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('DELETE /favorites error:', err);
+    res.status(500).json({ error: 'Kunne ikke fjerne favorit' });
+  }
+});
+
+
 // â”€â”€â”€ FOODS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // GET /foods/search?q=... - Søg i food database (lokal cache + Open Food Facts fallback)
@@ -3253,6 +3379,7 @@ app.get('/daily-summary', authMiddleware, async (req, res) => {
 
 registerStrengthEndpoints(app, pool, authMiddleware);
 registerMealPlanEndpoints(app, pool, authMiddleware);
+initFavoritesTable();
 app.listen(PORT, () => {
   console.log(`ðŸƒ RunWithAI server kÃ¸rer pÃ¥ port ${PORT}`);
   console.log(`ðŸ“¦ Version: 3.0.1-revenuecat`);
