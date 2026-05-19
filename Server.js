@@ -2323,23 +2323,30 @@ app.delete('/meals/:id', authMiddleware, async (req, res) => {
 // ════════════════════════════════ FAVORITES & HISTORY ════════════════════════════════
 async function initFavoritesTable() {
   try {
+    // Migration: drop old table if it has wrong food_id type (INTEGER instead of UUID)
+    const check = await pool.query(
+      "SELECT data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='user_favorites' AND column_name='food_id'"
+    );
+    if (check.rows.length > 0 && check.rows[0].data_type !== 'uuid') {
+      console.log('Migrating user_favorites: dropping old table with food_id type=' + check.rows[0].data_type);
+      await pool.query('DROP TABLE user_favorites');
+    }
     await pool.query(`
       CREATE TABLE IF NOT EXISTS user_favorites (
         user_id INTEGER NOT NULL,
-        food_id INTEGER NOT NULL,
+        food_id UUID NOT NULL,
         last_amount NUMERIC,
         last_unit TEXT,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         PRIMARY KEY (user_id, food_id)
-      )
+      );
     `);
     console.log('user_favorites table ready');
   } catch (err) {
-    console.error('initFavoritesTable error:', err.message);
+    console.error('initFavoritesTable error:', err);
   }
 }
 
-// GET /meals/recent - sidste 20 unikke fødevarer brugeren har logget
 app.get('/meals/recent', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -2415,8 +2422,10 @@ app.get('/favorites', authMiddleware, async (req, res) => {
 // POST /favorites/:foodId - tilfoej til favoritter
 app.post('/favorites/:foodId', authMiddleware, async (req, res) => {
   try {
-    const foodId = parseInt(req.params.foodId, 10);
-    if (!foodId) return res.status(400).json({ error: 'Ugyldigt food id' });
+    const foodId = req.params.foodId;
+    if (!foodId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(foodId)) {
+      return res.status(400).json({ error: 'Ugyldigt food id' });
+    }
     const { last_amount, last_unit } = req.body || {};
     await pool.query(
       `INSERT INTO user_favorites (user_id, food_id, last_amount, last_unit)
@@ -2432,12 +2441,16 @@ app.post('/favorites/:foodId', authMiddleware, async (req, res) => {
   }
 });
 
-// DELETE /favorites/:foodId - fjern favorit
 app.delete('/favorites/:foodId', authMiddleware, async (req, res) => {
   try {
-    const foodId = parseInt(req.params.foodId, 10);
-    if (!foodId) return res.status(400).json({ error: 'Ugyldigt food id' });
-    await pool.query('DELETE FROM user_favorites WHERE user_id = $1 AND food_id = $2', [req.userId, foodId]);
+    const foodId = req.params.foodId;
+    if (!foodId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(foodId)) {
+      return res.status(400).json({ error: 'Ugyldigt food id' });
+    }
+    await pool.query(
+      'DELETE FROM user_favorites WHERE user_id = $1 AND food_id = $2',
+      [req.userId, foodId]
+    );
     res.json({ ok: true });
   } catch (err) {
     console.error('DELETE /favorites error:', err);
@@ -2445,10 +2458,6 @@ app.delete('/favorites/:foodId', authMiddleware, async (req, res) => {
   }
 });
 
-
-// â”€â”€â”€ FOODS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
-// GET /foods/search?q=... - Søg i food database (lokal cache + Open Food Facts fallback)
 app.get('/foods/search', authMiddleware, async (req, res) => {
   try {
     const q = (req.query.q || '').trim();
@@ -3501,104 +3510,94 @@ app.get('/daily-summary', authMiddleware, async (req, res) => {
 // GET /meals/summary-range?days=7
 // Returns array of last N days: [{date, kcal_in, kcal_out_activity, protein_g, carbs_g, fat_g}, ...]
 // Ordered oldest -> newest
+// GET /meals/summary-range?start=YYYY-MM-DD&end=YYYY-MM-DD - Daglig oversigt for periode
 app.get('/meals/summary-range', authMiddleware, async (req, res) => {
   try {
-    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 30);
-    const endDate = req.query.end_date || new Date().toISOString().split('T')[0];
-
-    // Build the list of dates (oldest to newest)
-    const dates = [];
-    const endDt = new Date(endDate + 'T00:00:00');
-    for (let i = days - 1; i >= 0; i--) {
-      const d = new Date(endDt);
-      d.setDate(d.getDate() - i);
-      const yyyy = d.getFullYear();
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      dates.push(yyyy + '-' + mm + '-' + dd);
+    const { start, end } = req.query;
+    if (!start || !end || !/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end)) {
+      return res.status(400).json({ error: 'start og end skal vaere YYYY-MM-DD' });
     }
 
-    const startDate = dates[0];
-
-    // Kalorier IND fra meals grouped by date
-    const kcalInRows = await pool.query(
-      "SELECT DATE(m.eaten_at) AS d, " +
-      "  COALESCE(SUM(mi.kcal), 0) AS kcal, " +
-      "  COALESCE(SUM(mi.protein_g), 0) AS protein, " +
-      "  COALESCE(SUM(mi.carbs_g), 0) AS carbs, " +
-      "  COALESCE(SUM(mi.fat_g), 0) AS fat " +
-      "FROM meals m JOIN meal_items mi ON mi.meal_id = m.id " +
-      "WHERE m.user_id = $1 AND DATE(m.eaten_at) BETWEEN $2 AND $3 " +
-      "GROUP BY DATE(m.eaten_at)",
-      [req.userId, startDate, endDate]
+    // Meals: sum kcal/protein/carbs/fat per day from meal_items joined with meals
+    const mealsResult = await pool.query(
+      `SELECT TO_CHAR(DATE(m.eaten_at), 'YYYY-MM-DD') AS day,
+              COALESCE(SUM(mi.kcal), 0)::int AS kcal,
+              COALESCE(SUM(mi.protein_g), 0)::numeric AS protein_g,
+              COALESCE(SUM(mi.carbs_g), 0)::numeric AS carbs_g,
+              COALESCE(SUM(mi.fat_g), 0)::numeric AS fat_g
+         FROM meal_items mi
+         JOIN meals m ON m.id = mi.meal_id
+        WHERE m.user_id = $1
+          AND m.eaten_at >= $2::date
+          AND m.eaten_at < ($3::date + INTERVAL '1 day')
+        GROUP BY DATE(m.eaten_at)
+        ORDER BY DATE(m.eaten_at)`,
+      [req.userId, start, end]
     );
 
-    // Kalorier UD fra activities grouped by date
-    const kcalOutActRows = await pool.query(
-      "SELECT DATE(started_at) AS d, COALESCE(SUM(calories_kcal), 0) AS kcal " +
-      "FROM activities WHERE user_id = $1 AND DATE(started_at) BETWEEN $2 AND $3 " +
-      "GROUP BY DATE(started_at)",
-      [req.userId, startDate, endDate]
-    );
+    // Activities: sum kcal_burned per day
+    let activitiesResult = { rows: [] };
+    try {
+      activitiesResult = await pool.query(
+        `SELECT TO_CHAR(DATE(started_at), 'YYYY-MM-DD') AS day,
+                COALESCE(SUM(kcal_burned), 0)::int AS kcal_burned
+           FROM activities
+          WHERE user_id = $1
+            AND started_at >= $2::date
+            AND started_at < ($3::date + INTERVAL '1 day')
+          GROUP BY DATE(started_at)
+          ORDER BY DATE(started_at)`,
+        [req.userId, start, end]
+      );
+    } catch (e) { /* activities table may have different schema */ }
 
-    // Kalorier UD fra runs grouped by date
-    const kcalOutRunRows = await pool.query(
-      "SELECT DATE(started_at) AS d, COALESCE(SUM(calories), 0) AS kcal " +
-      "FROM runs WHERE user_id = $1 AND DATE(started_at) BETWEEN $2 AND $3 " +
-      "GROUP BY DATE(started_at)",
-      [req.userId, startDate, endDate]
-    );
+    // Runs: sum kcal per day
+    let runsResult = { rows: [] };
+    try {
+      runsResult = await pool.query(
+        `SELECT TO_CHAR(DATE(started_at), 'YYYY-MM-DD') AS day,
+                COALESCE(SUM(calories), 0)::int AS run_kcal
+           FROM runs
+          WHERE user_id = $1
+            AND started_at >= $2::date
+            AND started_at < ($3::date + INTERVAL '1 day')
+          GROUP BY DATE(started_at)
+          ORDER BY DATE(started_at)`,
+        [req.userId, start, end]
+      );
+    } catch (e) { /* runs table may have different schema */ }
 
-    // Build a lookup map keyed by YYYY-MM-DD
-    const toIso = (val) => {
-      if (!val) return '';
-      try {
-        const dt = new Date(val);
-        const yy = dt.getFullYear();
-        const mm = String(dt.getMonth() + 1).padStart(2, '0');
-        const dd = String(dt.getDate()).padStart(2, '0');
-        return yy + '-' + mm + '-' + dd;
-      } catch (e) { return ''; }
-    };
-
-    const inMap = new Map();
-    for (const r of kcalInRows.rows) {
-      inMap.set(toIso(r.d), {
-        kcal: parseFloat(r.kcal) || 0,
-        protein: parseFloat(r.protein) || 0,
-        carbs: parseFloat(r.carbs) || 0,
-        fat: parseFloat(r.fat) || 0
-      });
-    }
-    const actMap = new Map();
-    for (const r of kcalOutActRows.rows) {
-      actMap.set(toIso(r.d), parseFloat(r.kcal) || 0);
-    }
-    const runMap = new Map();
-    for (const r of kcalOutRunRows.rows) {
-      runMap.set(toIso(r.d), parseFloat(r.kcal) || 0);
+    // Build day list from start to end
+    const startDate = new Date(start + 'T00:00:00Z');
+    const endDate = new Date(end + 'T00:00:00Z');
+    const days = [];
+    for (let d = new Date(startDate); d <= endDate; d.setUTCDate(d.getUTCDate() + 1)) {
+      days.push(d.toISOString().slice(0, 10));
     }
 
-    const result = dates.map(d => {
-      const ind = inMap.get(d) || { kcal: 0, protein: 0, carbs: 0, fat: 0 };
-      const aOut = actMap.get(d) || 0;
-      const rOut = runMap.get(d) || 0;
-      return {
-        date: d,
-        kcal_in: Math.round(ind.kcal),
-        kcal_out_activity: Math.round(aOut + rOut),
-        protein_g: Math.round(ind.protein * 10) / 10,
-        carbs_g: Math.round(ind.carbs * 10) / 10,
-        fat_g: Math.round(ind.fat * 10) / 10
-      };
-    });
+    const mealsByDay = {};
+    mealsResult.rows.forEach(r => { mealsByDay[r.day] = r; });
+    const actByDay = {};
+    activitiesResult.rows.forEach(r => { actByDay[r.day] = r; });
+    const runsByDay = {};
+    runsResult.rows.forEach(r => { runsByDay[r.day] = r; });
 
-    res.json({ days: result });
+    const summary = days.map(day => ({
+      day,
+      kcal_in: mealsByDay[day] ? Number(mealsByDay[day].kcal) : 0,
+      protein_g: mealsByDay[day] ? Number(mealsByDay[day].protein_g) : 0,
+      carbs_g: mealsByDay[day] ? Number(mealsByDay[day].carbs_g) : 0,
+      fat_g: mealsByDay[day] ? Number(mealsByDay[day].fat_g) : 0,
+      kcal_out: (actByDay[day] ? Number(actByDay[day].kcal_burned) : 0) + (runsByDay[day] ? Number(runsByDay[day].run_kcal) : 0)
+    }));
+
+    res.json(summary);
   } catch (err) {
-    console.error('Summary range error:', err);
+    console.error('GET /meals/summary-range error:', err);
     res.status(500).json({ error: 'Kunne ikke hente periode-oversigt' });
   }
 });
+
 
 registerStrengthEndpoints(app, pool, authMiddleware);
 registerMealPlanEndpoints(app, pool, authMiddleware);
