@@ -2636,6 +2636,23 @@ app.get('/admin/health-check', async (req, res) => {
       result.user_favorites_columns = 'ERR: ' + e.message;
     }
 
+    try {
+      const recent = await pool.query(
+        "SELECT user_id, food_id, last_amount, last_unit, created_at FROM user_favorites ORDER BY created_at DESC LIMIT 10"
+      );
+      result.recent_favorites = recent.rows;
+      const perUser = await pool.query(
+        "SELECT user_id, COUNT(*)::int AS n FROM user_favorites GROUP BY user_id ORDER BY n DESC"
+      );
+      result.favorites_per_user = perUser.rows;
+      const recentUsers = await pool.query(
+        "SELECT id, email, created_at FROM users ORDER BY created_at DESC LIMIT 5"
+      );
+      result.recent_users = recentUsers.rows;
+    } catch (e) {
+      result.errors.push('recent_favorites: ' + e.message);
+    }
+
     res.json(result);
   } catch (err) {
     console.error('health-check error:', err);
