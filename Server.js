@@ -3377,6 +3377,109 @@ app.get('/daily-summary', authMiddleware, async (req, res) => {
   }
 });
 
+
+// GET /meals/summary-range?days=7
+// Returns array of last N days: [{date, kcal_in, kcal_out_activity, protein_g, carbs_g, fat_g}, ...]
+// Ordered oldest -> newest
+app.get('/meals/summary-range', authMiddleware, async (req, res) => {
+  try {
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 30);
+    const endDate = req.query.end_date || new Date().toISOString().split('T')[0];
+
+    // Build the list of dates (oldest to newest)
+    const dates = [];
+    const endDt = new Date(endDate + 'T00:00:00');
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(endDt);
+      d.setDate(d.getDate() - i);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      dates.push(yyyy + '-' + mm + '-' + dd);
+    }
+
+    const startDate = dates[0];
+
+    // Kalorier IND fra meals grouped by date
+    const kcalInRows = await pool.query(
+      "SELECT DATE(m.eaten_at) AS d, " +
+      "  COALESCE(SUM(mi.kcal), 0) AS kcal, " +
+      "  COALESCE(SUM(mi.protein_g), 0) AS protein, " +
+      "  COALESCE(SUM(mi.carbs_g), 0) AS carbs, " +
+      "  COALESCE(SUM(mi.fat_g), 0) AS fat " +
+      "FROM meals m JOIN meal_items mi ON mi.meal_id = m.id " +
+      "WHERE m.user_id = $1 AND DATE(m.eaten_at) BETWEEN $2 AND $3 " +
+      "GROUP BY DATE(m.eaten_at)",
+      [req.userId, startDate, endDate]
+    );
+
+    // Kalorier UD fra activities grouped by date
+    const kcalOutActRows = await pool.query(
+      "SELECT DATE(started_at) AS d, COALESCE(SUM(calories_kcal), 0) AS kcal " +
+      "FROM activities WHERE user_id = $1 AND DATE(started_at) BETWEEN $2 AND $3 " +
+      "GROUP BY DATE(started_at)",
+      [req.userId, startDate, endDate]
+    );
+
+    // Kalorier UD fra runs grouped by date
+    const kcalOutRunRows = await pool.query(
+      "SELECT DATE(started_at) AS d, COALESCE(SUM(calories), 0) AS kcal " +
+      "FROM runs WHERE user_id = $1 AND DATE(started_at) BETWEEN $2 AND $3 " +
+      "GROUP BY DATE(started_at)",
+      [req.userId, startDate, endDate]
+    );
+
+    // Build a lookup map keyed by YYYY-MM-DD
+    const toIso = (val) => {
+      if (!val) return '';
+      try {
+        const dt = new Date(val);
+        const yy = dt.getFullYear();
+        const mm = String(dt.getMonth() + 1).padStart(2, '0');
+        const dd = String(dt.getDate()).padStart(2, '0');
+        return yy + '-' + mm + '-' + dd;
+      } catch (e) { return ''; }
+    };
+
+    const inMap = new Map();
+    for (const r of kcalInRows.rows) {
+      inMap.set(toIso(r.d), {
+        kcal: parseFloat(r.kcal) || 0,
+        protein: parseFloat(r.protein) || 0,
+        carbs: parseFloat(r.carbs) || 0,
+        fat: parseFloat(r.fat) || 0
+      });
+    }
+    const actMap = new Map();
+    for (const r of kcalOutActRows.rows) {
+      actMap.set(toIso(r.d), parseFloat(r.kcal) || 0);
+    }
+    const runMap = new Map();
+    for (const r of kcalOutRunRows.rows) {
+      runMap.set(toIso(r.d), parseFloat(r.kcal) || 0);
+    }
+
+    const result = dates.map(d => {
+      const ind = inMap.get(d) || { kcal: 0, protein: 0, carbs: 0, fat: 0 };
+      const aOut = actMap.get(d) || 0;
+      const rOut = runMap.get(d) || 0;
+      return {
+        date: d,
+        kcal_in: Math.round(ind.kcal),
+        kcal_out_activity: Math.round(aOut + rOut),
+        protein_g: Math.round(ind.protein * 10) / 10,
+        carbs_g: Math.round(ind.carbs * 10) / 10,
+        fat_g: Math.round(ind.fat * 10) / 10
+      };
+    });
+
+    res.json({ days: result });
+  } catch (err) {
+    console.error('Summary range error:', err);
+    res.status(500).json({ error: 'Kunne ikke hente periode-oversigt' });
+  }
+});
+
 registerStrengthEndpoints(app, pool, authMiddleware);
 registerMealPlanEndpoints(app, pool, authMiddleware);
 initFavoritesTable();
