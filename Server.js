@@ -2590,6 +2590,59 @@ Hvis du ikke kan identificere fodevaren, returner: {"error":"unknown"}`;
 
 // GET /foods/barcode/:ean - SlÃ¥ produkt op via stregkode (Open Food Facts)
 
+// GET /admin/health-check - Diagnose database tables (admin only)
+app.get('/admin/health-check', async (req, res) => {
+  try {
+    const auth = req.headers.authorization || '';
+    const token = auth.replace(/^Bearer\s+/, '').trim();
+    if (!process.env.ADMIN_TOKEN || token !== process.env.ADMIN_TOKEN) {
+      return res.status(401).json({ error: 'unauthorized' });
+    }
+
+    const result = {
+      timestamp: new Date().toISOString(),
+      tables: {},
+      counts: {},
+      errors: []
+    };
+
+    const expectedTables = ['users', 'foods', 'meals', 'user_favorites', 'activities', 'runs'];
+    for (const tbl of expectedTables) {
+      try {
+        const r = await pool.query(
+          "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema='public' AND table_name=$1) AS exists",
+          [tbl]
+        );
+        result.tables[tbl] = r.rows[0].exists;
+        if (r.rows[0].exists) {
+          try {
+            const c = await pool.query('SELECT COUNT(*)::int AS n FROM ' + tbl);
+            result.counts[tbl] = c.rows[0].n;
+          } catch (e) {
+            result.counts[tbl] = 'ERR: ' + e.message;
+          }
+        }
+      } catch (e) {
+        result.errors.push(tbl + ': ' + e.message);
+      }
+    }
+
+    try {
+      const cols = await pool.query(
+        "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='public' AND table_name='user_favorites'"
+      );
+      result.user_favorites_columns = cols.rows;
+    } catch (e) {
+      result.user_favorites_columns = 'ERR: ' + e.message;
+    }
+
+    res.json(result);
+  } catch (err) {
+    console.error('health-check error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /admin/seed-basics - Seed Danish basic foods (Frida-based) - admin only
 app.post('/admin/seed-basics', async (req, res) => {
   try {
