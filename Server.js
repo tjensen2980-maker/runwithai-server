@@ -1943,11 +1943,12 @@ app.get('/activities', authMiddleware, async (req, res) => {
       params.push(parseInt(limit, 10));
     }
     const result = await pool.query(query, params);
+    console.log('GET /activities user=' + req.userId + ' typeFilter=' + (type || 'none') + ' returned=' + result.rows.length + ' bikes=' + result.rows.filter(function(r){return r.type === 'bike';}).length);
     res.json(result.rows);
   } catch (err) {
     console.error('Get activities error:', err);
     res.status(500).json({ error: 'Kunne ikke hente aktiviteter' });
-  }
+    }
 });
 
 // POST /activities - Opret en ny aktivitet (med detail-tabel for run/bike)
