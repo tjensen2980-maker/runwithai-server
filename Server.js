@@ -984,6 +984,23 @@ app.delete('/runs/:id', authMiddleware, async (req, res) => {
   }
 });
 
+// DELETE a single activity (bike/multi-activity) - only own activities
+app.delete('/activities/:id', authMiddleware, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'DELETE FROM activities WHERE id = $1 AND user_id = $2 RETURNING id',
+      [req.params.id, req.userId]
+      );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Aktivitet ikke fundet' });
+    }
+    res.json({ success: true, deletedId: result.rows[0].id });
+  } catch (err) {
+    console.error('Delete activity error:', err);
+    res.status(500).json({ error: 'Kunne ikke slette aktivitet' });
+  }
+});
+
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // CHALLENGES & STREAKS
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
