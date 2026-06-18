@@ -1599,7 +1599,7 @@ const { model, max_tokens, system, messages } = req.body;
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
         max_tokens: max_tokens || 2000,
         system: system || '',
         messages: messages || [],
