@@ -1599,7 +1599,7 @@ const { model, max_tokens, system, messages } = req.body;
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: model || 'claude-sonnet-4-20250514',
+        model: model || process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
         max_tokens: max_tokens || 2000,
         system: system || '',
         messages: messages || [],
@@ -3115,7 +3115,7 @@ app.post('/foods/analyze-photo', authMiddleware, async (req, res) => {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
         max_tokens: 1500,
         system: systemPrompt,
         messages: [{
@@ -3174,7 +3174,7 @@ app.post('/foods/parse-text', authMiddleware, async (req, res) => {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-20250514',
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
         max_tokens: 1500,
         system: systemPrompt,
         messages: [{ role: 'user', content: userPrompt }],
