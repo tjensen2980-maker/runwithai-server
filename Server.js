@@ -1483,45 +1483,47 @@ app.get('/trainingplan', authMiddleware, async (req, res) => {
 });
 
 app.post('/trainingplan/generate', async (req, res) => {
-  try {
-    const profile = (req.body && req.body.profile) || {};
-    const level = (req.body && req.body.level) || 'Begynder';
-    const recentRuns = (req.body && req.body.recentRuns) || [];
-    const name = profile.name || 'løber';
-    const goal = profile.goal || 'komme i bedre form';
-    const weeklyKm = Number(profile.weeklyKm) || 15;
-    const age = profile.age || null;
-    const buildFallback = () => {
-      const perRunBase = level === 'Erfaren' ? 8 : level === 'Øvet' ? 6 : 4;
-      const days = ['Mandag','Tirsdag','Onsdag','Torsdag','Fredag','Lørdag','Søndag'];
-      const restDays = level === 'Begynder' ? [1,3,5] : level === 'Øvet' ? [2,5] : [3];
-      const wp = [];
-      for (let w = 1; w <= 4; w++) {
-        for (let d = 0; d < 7; d++) {
-          const isRest = restDays.indexOf(d) !== -1;
-          const km = isRest ? 0 : Math.round((perRunBase + w * 0.5) * 10) / 10;
-          wp.push({
-            day: 'Uge ' + w + ' – ' + days[d],
-            title: isRest ? 'Hvile' : (d === 6 ? 'Lang tur' : 'Løbetur'),
-            workout: isRest ? 'Restitution – hvil eller let gåtur.' : ('Løb ' + km + ' km i roligt tempo. Fokus på jævn vejrtrækning.'),
-            km: km,
-            rest: isRest
-          });
-        }
+  const profile = (req.body && req.body.profile) || {};
+  const level = (req.body && req.body.level) || 'Begynder';
+  const name = profile.name || 'løber';
+  const goal = profile.goal || 'komme i bedre form';
+  const weeklyKm = Number(profile.weeklyKm) || 15;
+  const age = profile.age || null;
+  const buildFallback = () => {
+    const perRunBase = level === 'Erfaren' ? 8 : level === 'Øvet' ? 6 : 4;
+    const days = ['Mandag','Tirsdag','Onsdag','Torsdag','Fredag','Lørdag','Søndag'];
+    const restDays = level === 'Begynder' ? [1,3,5] : level === 'Øvet' ? [2,5] : [3];
+    const wp = [];
+    for (let w = 1; w <= 4; w++) {
+      for (let d = 0; d < 7; d++) {
+        const isRest = restDays.indexOf(d) !== -1;
+        const km = isRest ? 0 : Math.round((perRunBase + w * 0.5) * 10) / 10;
+        wp.push({
+          day: 'Uge ' + w + ' – ' + days[d],
+          title: isRest ? 'Hvile' : (d === 6 ? 'Lang tur' : 'Løbetur'),
+          workout: isRest ? 'Restitution – hvil eller let gåtur.' : ('Løb ' + km + ' km i roligt tempo. Fokus på jævn vejrtrækning.'),
+          km: km,
+          rest: isRest
+        });
       }
-      return {
-        summary: 'Hej ' + name + '! Ud fra dit mål om at ' + goal + ' og ca. ' + weeklyKm + ' km om ugen på ' + level + '-niveau, har jeg lagt en 4-ugers plan der bygger dig gradvist op. Vi starter roligt og øger langsomt.',
-        weekPlan: wp
-      };
+    }
+    return {
+      summary: 'Hej ' + name + '! Ud fra dit mål om at ' + goal + ' og ca. ' + weeklyKm + ' km om ugen på ' + level + '-niveau, har jeg lagt en 4-ugers plan der bygger dig gradvist op. Vi starter roligt og øger langsomt.',
+      weekPlan: wp
     };
+  };
+  try {
     const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) { return res.json(buildFallback()); }
-    const sys = 'Du er en erfaren, varm dansk løbecoach. Du svarer KUN med gyldig JSON, ingen markdown, ingen forklaring udenfor JSON. Formatet er: {"summary": string, "weekPlan": [{"day": string, "title": string, "workout": string, "km": number, "rest": boolean}]}. weekPlan skal indeholde præcis 28 objekter (4 uger a 7 dage). summary skal være en kort, personlig og motiverende tekst på dansk der nævner brugerens navn og mål, så brugeren mærker at du lyttede.';
-    const userMsg = 'Lav en personlig 4-ugers løbeplan. Brugerens navn: ' + name + '. Mål: ' + goal + '. Nuværende niveau: ' + level + '. Ugentligt km-mål: ' + weeklyKm + ' km.' + (age ? (' Alder: ' + age + '.') : '') + ' Byg gradvist op over de 4 uger. Angiv dagene som "Uge X – Ugedag". Hviledage skal have rest=true, km=0, title="Hvile". Svar KUN med JSON.';
+    if (!apiKey) { console.log('[trainingplan] no api key, fallback'); return res.json(buildFallback()); }
+    const sys = 'Du er en erfaren, varm dansk løbecoach. Svar KUN med kompakt gyldig JSON, ingen markdown, ingen tekst udenfor JSON. Format: {"summary": string, "weekPlan": [{"day": string, "title": string, "workout": string, "km": number, "rest": boolean}]}. weekPlan skal have præcis 28 objekter (4 uger a 7 dage). Hold workout-tekster korte (max 12 ord). summary skal være kort, personlig og motiverende på dansk, nævne brugerens navn og mål.';
+    const userMsg = 'Lav en personlig 4-ugers løbeplan. Navn: ' + name + '. Mål: ' + goal + '. Niveau: ' + level + '. Ugentligt km-mål: ' + weeklyKm + ' km.' + (age ? (' Alder: ' + age + '.') : '') + ' Byg gradvist op. Dage som "Uge X – Ugedag". Hviledage: rest=true, km=0, title="Hvile". Svar KUN med kompakt JSON.';
     let aiResult = null;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 18000);
     try {
       const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
+        signal: ctrl.signal,
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': apiKey,
@@ -1529,11 +1531,12 @@ app.post('/trainingplan/generate', async (req, res) => {
         },
         body: JSON.stringify({
           model: 'claude-sonnet-4-6',
-          max_tokens: 4000,
+          max_tokens: 2500,
           system: sys,
           messages: [{ role: 'user', content: userMsg }]
         })
       });
+      clearTimeout(timer);
       const data = await anthropicRes.json();
       if (data && data.content && data.content[0] && data.content[0].text) {
         let raw = data.content[0].text.trim();
@@ -1546,15 +1549,16 @@ app.post('/trainingplan/generate', async (req, res) => {
         }
       }
     } catch (aiErr) {
+      clearTimeout(timer);
+      console.log('[trainingplan] ai failed: ' + (aiErr && aiErr.name) + ' ' + (aiErr && aiErr.message));
       aiResult = null;
     }
-    if (aiResult) { return res.json(aiResult); }
+    if (aiResult) { console.log('[trainingplan] ai ok, days=' + aiResult.weekPlan.length); return res.json(aiResult); }
+    console.log('[trainingplan] using fallback');
     return res.json(buildFallback());
   } catch (e) {
-    return res.status(200).json({
-      summary: 'Her er en startplan til dig. Vi justerer den løbende.',
-      weekPlan: []
-    });
+    console.log('[trainingplan] outer error: ' + (e && e.message));
+    return res.json(buildFallback());
   }
 });
 
