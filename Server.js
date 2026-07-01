@@ -1482,6 +1482,82 @@ app.get('/trainingplan', authMiddleware, async (req, res) => {
   }
 });
 
+app.post('/trainingplan/generate', async (req, res) => {
+  try {
+    const profile = (req.body && req.body.profile) || {};
+    const level = (req.body && req.body.level) || 'Begynder';
+    const recentRuns = (req.body && req.body.recentRuns) || [];
+    const name = profile.name || 'løber';
+    const goal = profile.goal || 'komme i bedre form';
+    const weeklyKm = Number(profile.weeklyKm) || 15;
+    const age = profile.age || null;
+    const buildFallback = () => {
+      const perRunBase = level === 'Erfaren' ? 8 : level === 'Øvet' ? 6 : 4;
+      const days = ['Mandag','Tirsdag','Onsdag','Torsdag','Fredag','Lørdag','Søndag'];
+      const restDays = level === 'Begynder' ? [1,3,5] : level === 'Øvet' ? [2,5] : [3];
+      const wp = [];
+      for (let w = 1; w <= 4; w++) {
+        for (let d = 0; d < 7; d++) {
+          const isRest = restDays.indexOf(d) !== -1;
+          const km = isRest ? 0 : Math.round((perRunBase + w * 0.5) * 10) / 10;
+          wp.push({
+            day: 'Uge ' + w + ' – ' + days[d],
+            title: isRest ? 'Hvile' : (d === 6 ? 'Lang tur' : 'Løbetur'),
+            workout: isRest ? 'Restitution – hvil eller let gåtur.' : ('Løb ' + km + ' km i roligt tempo. Fokus på jævn vejrtrækning.'),
+            km: km,
+            rest: isRest
+          });
+        }
+      }
+      return {
+        summary: 'Hej ' + name + '! Ud fra dit mål om at ' + goal + ' og ca. ' + weeklyKm + ' km om ugen på ' + level + '-niveau, har jeg lagt en 4-ugers plan der bygger dig gradvist op. Vi starter roligt og øger langsomt.',
+        weekPlan: wp
+      };
+    };
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) { return res.json(buildFallback()); }
+    const sys = 'Du er en erfaren, varm dansk løbecoach. Du svarer KUN med gyldig JSON, ingen markdown, ingen forklaring udenfor JSON. Formatet er: {"summary": string, "weekPlan": [{"day": string, "title": string, "workout": string, "km": number, "rest": boolean}]}. weekPlan skal indeholde præcis 28 objekter (4 uger a 7 dage). summary skal være en kort, personlig og motiverende tekst på dansk der nævner brugerens navn og mål, så brugeren mærker at du lyttede.';
+    const userMsg = 'Lav en personlig 4-ugers løbeplan. Brugerens navn: ' + name + '. Mål: ' + goal + '. Nuværende niveau: ' + level + '. Ugentligt km-mål: ' + weeklyKm + ' km.' + (age ? (' Alder: ' + age + '.') : '') + ' Byg gradvist op over de 4 uger. Angiv dagene som "Uge X – Ugedag". Hviledage skal have rest=true, km=0, title="Hvile". Svar KUN med JSON.';
+    let aiResult = null;
+    try {
+      const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 4000,
+          system: sys,
+          messages: [{ role: 'user', content: userMsg }]
+        })
+      });
+      const data = await anthropicRes.json();
+      if (data && data.content && data.content[0] && data.content[0].text) {
+        let raw = data.content[0].text.trim();
+        const first = raw.indexOf('{');
+        const last = raw.lastIndexOf('}');
+        if (first !== -1 && last !== -1) { raw = raw.slice(first, last + 1); }
+        const parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.weekPlan) && parsed.weekPlan.length > 0 && parsed.summary) {
+          aiResult = { summary: String(parsed.summary), weekPlan: parsed.weekPlan };
+        }
+      }
+    } catch (aiErr) {
+      aiResult = null;
+    }
+    if (aiResult) { return res.json(aiResult); }
+    return res.json(buildFallback());
+  } catch (e) {
+    return res.status(200).json({
+      summary: 'Her er en startplan til dig. Vi justerer den løbende.',
+      weekPlan: []
+    });
+  }
+});
+
 app.post('/trainingplan/save', authMiddleware, async (req, res) => {
   try {
     const { data } = req.body;
