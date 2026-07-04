@@ -119,6 +119,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'runwithai-secret-key-2024';
 // â”€â”€â”€ AUTH MIDDLEWARE â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const authMiddleware = async (req, res, next) => {
   const authHeader = req.headers.authorization;
+  console.log('[auth]', req.method, req.path, authHeader ? 'header:ja' : 'header:NEJ'); // MIDLERTIDIG diagnostik
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Ikke logget ind' });
   }
