@@ -1660,6 +1660,75 @@ app.post('/tts', authMiddleware, async (req, res) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // AI CHAT ENDPOINT (proxy to Anthropic API)
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// ── COACH-HJERNE: kontekst-motor ─────────────────────────────────────────
+// Samler brugerens profil, træningsplan og seneste løb til én kompakt
+// system-blok, så coachen kender brugeren i hvert svar. Bruges af /chat
+// og senere af hilsen, efter-løb-reaktion og notifikationer.
+// Defensiv: hvert opslag fejler stille, og en tom streng betyder blot
+// "ingen kontekst" - chatten må ALDRIG vælte på kontekst-fejl.
+async function buildCoachContext(userId) {
+  try {
+    const dele = [];
+    // Profil
+    try {
+      const pr = await pool.query('SELECT data FROM profile WHERE user_id = $1', [userId]);
+      let p = pr.rows[0] && pr.rows[0].data;
+      if (typeof p === 'string') { try { p = JSON.parse(p); } catch (e) {} }
+      if (p) {
+        const f = [];
+        if (p.name) f.push('Navn: ' + p.name);
+        if (p.age) f.push('Alder: ' + p.age);
+        if (p.level) f.push('Niveau: ' + p.level);
+        if (p.goal) f.push('Mål: ' + p.goal);
+        if (p.weeklyKm) f.push('Ugentlige km (ca.): ' + p.weeklyKm);
+        if (p.raceDate) f.push('Løbsdato: ' + p.raceDate);
+        if (p.injuries) f.push('VIGTIGT, skader/hensyn: ' + p.injuries);
+        if (f.length) dele.push('OM BRUGEREN: ' + f.join('. ') + '.');
+      }
+    } catch (e) {}
+    // Traeningsplan: i dag + de naeste 7 dage
+    try {
+      const tr = await pool.query('SELECT data FROM training_plan WHERE user_id = $1', [userId]);
+      let d = tr.rows[0] && tr.rows[0].data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (e) {} }
+      if (Array.isArray(d)) {
+        const pad = x => String(x).padStart(2, '0');
+        const nu = new Date();
+        const iso = dt => dt.getFullYear() + '-' + pad(dt.getMonth() + 1) + '-' + pad(dt.getDate());
+        const idag = iso(nu);
+        const om7 = new Date(nu); om7.setDate(nu.getDate() + 7);
+        const graense = iso(om7);
+        const kommende = [];
+        d.forEach(w => (w.days || []).forEach(s => {
+          if (s.date && s.date >= idag && s.date <= graense) {
+            kommende.push('- ' + s.date + (s.date === idag ? ' (I DAG)' : '') + ': ' +
+              (s.rest ? 'Hvile' : ((s.title || 'Træning') + (s.km ? ', ' + s.km + ' km' : '') + (s.workout ? ' — ' + s.workout : ''))));
+          }
+        }));
+        if (kommende.length) dele.push('TRÆNINGSPLAN (i dag og de næste 7 dage):\n' + kommende.join('\n'));
+      }
+    } catch (e) {}
+    // Seneste loeb
+    try {
+      const rr = await pool.query('SELECT date, km, duration FROM runs WHERE user_id = $1 ORDER BY date DESC LIMIT 5', [userId]);
+      if (rr.rows.length) {
+        const linjer = rr.rows.map(r => {
+          const dato = r.date ? String(r.date).slice(0, 10) : '?';
+          const km = r.km ? Number(r.km).toFixed(1) : null;
+          let min = null;
+          if (r.duration) { const dur = Number(r.duration); min = dur > 1000 ? Math.round(dur / 60) : Math.round(dur); }
+          return '- ' + dato + ': ' + (km ? km + ' km' : 'løb') + (min ? ' på ca. ' + min + ' min' : '');
+        });
+        dele.push('SENESTE LØB:\n' + linjer.join('\n'));
+      }
+    } catch (e) {}
+    if (!dele.length) return '';
+    return 'Du er brugerens personlige løbecoach i appen RunWithAI. Du kender brugeren og må gerne henvise konkret til deres plan og seneste løb.\n\n'
+      + dele.join('\n\n')
+      + '\n\nSvar altid på dansk, kort, varmt og konkret. Tag ALTID hensyn til nævnte skader, og forklar gerne HVORFOR en træning ser ud som den gør.';
+  } catch (e) { return ''; }
+}
+
 app.post('/chat', authMiddleware, async (req, res) => {
   try {
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -1672,6 +1741,8 @@ const { model, max_tokens, system, messages } = req.body;
       return res.status(400).json({ error: 'messages er påkrævet og må ikke være tom' });
     }
 
+    const coachContext = await buildCoachContext(req.userId);
+
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -1682,7 +1753,7 @@ const { model, max_tokens, system, messages } = req.body;
       body: JSON.stringify({
         model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
         max_tokens: max_tokens || 2000,
-        system: system || '',
+        system: ((coachContext || '') + '\n\n' + (system || '')).trim(),
         messages: messages || [],
       }),
     });
