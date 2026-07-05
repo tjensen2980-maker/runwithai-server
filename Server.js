@@ -427,6 +427,20 @@ app.delete('/delete-account', authMiddleware, async (req, res) => {
     // Clean up friends data
     try { await pool.query('DELETE FROM friends WHERE user_id = $1 OR friend_id = $1', [userId]); } catch (e) {}
 
+    // Alle tabeller med user_id skal ryddes foer users-raekken kan slettes
+    // (bl.a. messages/coach_messages manglede og blokerede sletning via FK).
+    try { await pool.query('DELETE FROM messages WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM coach_messages WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM comments WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM shared_runs WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM activities WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM badges WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM daily_summary WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM integrations WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM meals WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM user_favorites WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM user_goals WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM workout_templates WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM runs WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM training_plan WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM week_plan WHERE user_id = $1', [userId]); } catch (e) {}
