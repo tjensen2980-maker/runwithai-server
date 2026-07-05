@@ -1696,7 +1696,7 @@ async function buildCoachContext(userId) {
         const nu = new Date();
         const iso = dt => dt.getFullYear() + '-' + pad(dt.getMonth() + 1) + '-' + pad(dt.getDate());
         const idag = iso(nu);
-        const om7 = new Date(nu); om7.setDate(nu.getDate() + 7);
+        const om7 = new Date(nu); om7.setDate(nu.getDate() + 28); // 4 uger frem, saa coachen kan planlaegge omkring pauser
         const graense = iso(om7);
         const kommende = [];
         d.forEach(w => (w.days || []).forEach(s => {
@@ -1705,7 +1705,7 @@ async function buildCoachContext(userId) {
               (s.rest ? 'Hvile' : ((s.title || 'Træning') + (s.km ? ', ' + s.km + ' km' : '') + (s.workout ? ' — ' + s.workout : ''))));
           }
         }));
-        if (kommende.length) dele.push('TRÆNINGSPLAN (i dag og de næste 7 dage):\n' + kommende.join('\n'));
+        if (kommende.length) dele.push('TRÆNINGSPLAN (i dag og de kommende 4 uger):\n' + kommende.join('\n'));
       }
     } catch (e) {}
     // Seneste loeb
