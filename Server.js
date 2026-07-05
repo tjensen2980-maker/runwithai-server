@@ -1743,6 +1743,38 @@ async function buildCoachContext(userId) {
   } catch (e) { return ''; }
 }
 
+// ── COACH-HJERNE: proaktiv hilsen ────────────────────────────────────────
+// Én personlig hilsen med 'derfor', bygget på kontekst-motoren.
+// Caches pr. bruger pr. dag, så Home-åbninger er hurtige og billige.
+const greetingCache = {};
+app.get('/coach-greeting', authMiddleware, async (req, res) => {
+  try {
+    const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+    const iDag = new Date().toISOString().slice(0, 10);
+    const noegle = req.userId + ':' + iDag;
+    if (greetingCache[noegle]) return res.json({ greeting: greetingCache[noegle], cached: true });
+    const ctx = await buildCoachContext(req.userId);
+    if (!ANTHROPIC_API_KEY || !ctx) return res.json({ greeting: null });
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+        max_tokens: 200,
+        system: ctx + '\n\nSkriv én kort, varm hilsen (maks 2 sætninger) til brugeren fra deres personlige løbecoach. Nævn dagens træning fra planen, og forklar kort HVORFOR dagen ser sådan ud (fx ud fra seneste løb, skader eller ugens rytme). Brug brugerens fornavn hvis kendt. Højst én emoji. Svar KUN med selve hilsenen.',
+        messages: [{ role: 'user', content: 'Skriv dagens hilsen til mig.' }],
+      }),
+    });
+    if (!r.ok) return res.json({ greeting: null });
+    const data = await r.json();
+    const tekst = (data.content && data.content[0] && data.content[0].text || '').trim();
+    if (tekst) greetingCache[noegle] = tekst;
+    return res.json({ greeting: tekst || null });
+  } catch (e) {
+    return res.json({ greeting: null });
+  }
+});
+
 app.post('/chat', authMiddleware, async (req, res) => {
   try {
     const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
