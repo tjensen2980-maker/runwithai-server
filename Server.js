@@ -920,7 +920,28 @@ app.get('/runs', authMiddleware, async (req, res) => {
       'SELECT * FROM runs WHERE user_id = $1 ORDER BY date DESC',
       [req.userId]
     );
-    res.json(result.rows);
+    // cykelKompat: cykelture (og andre aktiviteter) bor i activities-tabellen -
+    // flet dem ind i runs-format, saa statistik, web og coach ser ALT.
+    let aktiviteter = [];
+    try {
+      const a = await pool.query('SELECT * FROM activities WHERE user_id = $1', [req.userId]);
+      aktiviteter = a.rows.map(r => ({
+        id: 'act-' + r.id,
+        user_id: r.user_id,
+        date: r.started_at,
+        km: r.distance_m != null ? Number(r.distance_m) / 1000 : 0,
+        duration: r.duration_sec,
+        pace: null,
+        calories: r.calories_kcal,
+        heart_rate: r.avg_hr,
+        max_hr: r.max_hr,
+        route: r.gps_polyline || null,
+        notes: r.notes || null,
+        type: r.type || 'activity',
+      }));
+    } catch (e) {}
+    const alleTure = result.rows.concat(aktiviteter).sort((x, y) => new Date(y.date) - new Date(x.date));
+    res.json(alleTure);
   } catch (err) {
     console.error('Get runs error:', err);
     res.status(500).json({ error: 'Kunne ikke hente lÃ¸b' });
