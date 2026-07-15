@@ -924,18 +924,18 @@ app.get('/runs', authMiddleware, async (req, res) => {
     // flet dem ind i runs-format, saa statistik, web og coach ser ALT.
     let aktiviteter = [];
     try {
-      const a = await pool.query('SELECT * FROM activities WHERE user_id = $1', [req.userId]);
+      const a = await pool.query('SELECT a.*, COALESCE(bd.distance_m, rd.distance_m) AS det_distance_m, COALESCE(bd.gps_polyline, rd.gps_polyline) AS det_gps FROM activities a LEFT JOIN activity_bike_details bd ON bd.activity_id = a.id LEFT JOIN activity_run_details rd ON rd.activity_id = a.id WHERE a.user_id = $1', [req.userId]);
       aktiviteter = a.rows.map(r => ({
         id: 'act-' + r.id,
         user_id: r.user_id,
         date: r.started_at,
-        km: r.distance_m != null ? Number(r.distance_m) / 1000 : 0,
+        km: r.det_distance_m != null ? Number(r.det_distance_m) / 1000 : 0,
         duration: r.duration_sec,
         pace: null,
         calories: r.calories_kcal,
         heart_rate: r.avg_hr,
         max_hr: r.max_hr,
-        route: r.gps_polyline || null,
+        route: r.det_gps || null,
         notes: r.notes || null,
         type: r.type || 'activity',
       }));
