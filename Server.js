@@ -19,6 +19,7 @@ const Stripe = require('stripe');
 const multer = require('multer');
 const { registerStrengthEndpoints } = require('./strengthEndpoints');
 const { registerMealPlanEndpoints } = require('./mealPlanEndpoints');
+const { registerStravaEndpoints } = require('./stravaEndpoints');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -132,6 +133,10 @@ const authMiddleware = async (req, res, next) => {
     return res.status(401).json({ error: 'Ugyldig token' });
   }
 };
+
+const stravaIntegration = registerStravaEndpoints(app, pool, authMiddleware, {
+  jwtSecret: JWT_SECRET,
+});
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // AUTH ENDPOINTS
@@ -437,6 +442,7 @@ app.delete('/delete-account', authMiddleware, async (req, res) => {
     try { await pool.query('DELETE FROM badges WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM daily_summary WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM integrations WHERE user_id = $1', [userId]); } catch (e) {}
+    try { await pool.query('DELETE FROM oauth_integrations WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM meals WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM user_favorites WHERE user_id = $1', [userId]); } catch (e) {}
     try { await pool.query('DELETE FROM user_goals WHERE user_id = $1', [userId]); } catch (e) {}
@@ -994,6 +1000,11 @@ app.post('/runs', authMiddleware, async (req, res) => {
     } catch (chalErr) {
       console.warn('Challenge auto-log warning (run still saved):', chalErr.message);
     }
+
+    // Strava export must never block saving the run in RunWithAI.
+    stravaIntegration.syncRunToStrava(req.userId, savedRun).catch((stravaErr) => {
+      console.warn('Strava auto-sync warning (run still saved):', stravaErr.message);
+    });
 
     res.json(savedRun);
   } catch (err) {

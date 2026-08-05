@@ -1,6 +1,9 @@
 {
   "name": "runwithai-server",
   "version": "1.0.0",
+  "engines": {
+    "node": ">=20"
+  },
   "main": "Server.js",
   "scripts": {
     "start": "node Server.js",
