@@ -920,6 +920,37 @@ app.post('/create-portal-session', authMiddleware, async (req, res) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // RUNS ENDPOINTS
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+function normalizeRunRoute(value) {
+  let route = value;
+
+  // Older Watch builds sent the route as JSON text, and the API encoded that
+  // text once more before saving it. Unwrap those legacy layers as well.
+  for (let i = 0; i < 4 && typeof route === 'string'; i += 1) {
+    try {
+      route = JSON.parse(route);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  if (!Array.isArray(route)) return [];
+
+  return route.map((point) => {
+    if (!point || typeof point !== 'object') return null;
+    const lat = Number(point.lat != null ? point.lat : point.latitude);
+    const lng = Number(point.lng != null
+      ? point.lng
+      : (point.lon != null ? point.lon : point.longitude));
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)
+      || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+      return null;
+    }
+
+    return { ...point, lat, lng, lon: lng };
+  }).filter(Boolean);
+}
+
 app.get('/runs', authMiddleware, async (req, res) => {
   try {
     const result = await pool.query(
@@ -946,7 +977,16 @@ app.get('/runs', authMiddleware, async (req, res) => {
         type: r.type || 'activity',
       }));
     } catch (e) {}
-    const alleTure = result.rows.concat(aktiviteter).sort((x, y) => new Date(y.date) - new Date(x.date));
+    const runs = result.rows.map((run) => ({
+      ...run,
+      route: normalizeRunRoute(run.route),
+    }));
+    const normalizedActivities = aktiviteter.map((activity) => ({
+      ...activity,
+      route: normalizeRunRoute(activity.route),
+      isActivity: true,
+    }));
+    const alleTure = runs.concat(normalizedActivities).sort((x, y) => new Date(y.date) - new Date(x.date));
     res.json(alleTure);
   } catch (err) {
     console.error('Get runs error:', err);
@@ -966,6 +1006,8 @@ app.post('/runs', authMiddleware, async (req, res) => {
       });
     }
     const run = req.body;
+    const normalizedRoute = normalizeRunRoute(run.route);
+    console.log(`[runs] user=${req.userId} source=${run.source || 'app'} route_points=${normalizedRoute.length}`);
     const result = await pool.query(`
       INSERT INTO runs (user_id, date, km, duration, pace, calories, heart_rate, route, notes, type, created_at, running_km, walking_km, max_hr, cadence, total_ascent, total_descent, total_steps, splits, hr_samples)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), $11, $12, $13, $14, $15, $16, $17, $18, $19)
@@ -978,7 +1020,7 @@ app.post('/runs', authMiddleware, async (req, res) => {
       run.pace,
       run.calories,
       run.heart_rate,
-      run.route ? JSON.stringify(run.route) : null,
+      normalizedRoute.length ? JSON.stringify(normalizedRoute) : null,
       run.notes,
       run.type || 'run',
       run.running_km || null,
