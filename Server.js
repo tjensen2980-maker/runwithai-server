@@ -134,6 +134,55 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
+const FUNNEL_EVENTS = new Set([
+  'onboarding_started',
+  'onboarding_language_selected',
+  'onboarding_coach_completed',
+  'onboarding_plan_created',
+  'onboarding_plan_failed',
+  'onboarding_completed',
+  'first_activity_saved',
+  'paywall_viewed',
+  'paywall_plan_selected',
+  'paywall_free_selected',
+  'paywall_trial_tapped',
+  'paywall_trial_started',
+  'paywall_purchase_cancelled',
+  'paywall_purchase_failed',
+]);
+
+function sanitizeAnalyticsMetadata(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+
+  const sanitized = {};
+  Object.entries(value).slice(0, 20).forEach(([key, item]) => {
+    if (!/^[a-zA-Z0-9_]{1,50}$/.test(key)) return;
+    if (typeof item === 'string') sanitized[key] = item.slice(0, 200);
+    else if (typeof item === 'number' && Number.isFinite(item)) sanitized[key] = item;
+    else if (typeof item === 'boolean') sanitized[key] = item;
+  });
+  return sanitized;
+}
+
+app.post('/analytics/event', authMiddleware, async (req, res) => {
+  try {
+    const eventName = String(req.body?.event || '').trim();
+    if (!FUNNEL_EVENTS.has(eventName)) {
+      return res.status(400).json({ error: 'Ukendt analytics-event' });
+    }
+
+    const metadata = sanitizeAnalyticsMetadata(req.body?.metadata);
+    await pool.query(
+      'INSERT INTO analytics_events (user_id, event_name, metadata) VALUES ($1, $2, $3::jsonb)',
+      [req.userId, eventName, JSON.stringify(metadata)]
+    );
+    res.status(202).json({ accepted: true });
+  } catch (err) {
+    console.error('Analytics event error:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme analytics-event' });
+  }
+});
+
 const stravaIntegration = registerStravaEndpoints(app, pool, authMiddleware, {
   jwtSecret: JWT_SECRET,
 });
@@ -159,6 +208,15 @@ app.post('/register', async (req, res) => {
       [email.toLowerCase(), hashedPassword]
     );
     const user = result.rows[0];
+    try {
+      await pool.query(
+        "INSERT INTO analytics_events (user_id, event_name, metadata) VALUES ($1, 'account_created', $2::jsonb)",
+        [user.id, JSON.stringify({ source: 'account_created' })]
+      );
+    } catch (analyticsError) {
+      // Analytics must never prevent a user from creating an account.
+      console.error('Account analytics warning:', analyticsError);
+    }
     const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ token, user: { id: user.id, email: user.email } });
   } catch (err) {
