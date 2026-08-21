@@ -45,6 +45,32 @@ const TIERS = {
   }
 };
 
+const AUTOMATIC_TRIAL_DAYS = 14;
+
+function resolveSubscriptionAccess(user) {
+  const rawTier = user?.subscription_tier || 'free';
+  const rawStatus = user?.subscription_status || 'active';
+  const trialEndsAt = user?.subscription_ends_at ? new Date(user.subscription_ends_at) : null;
+  const hasValidTrialEnd = trialEndsAt instanceof Date && Number.isFinite(trialEndsAt.getTime());
+  const isTrialing = rawStatus === 'trialing';
+  const trialActive = isTrialing
+    && hasValidTrialEnd
+    && trialEndsAt.getTime() > Date.now();
+  const trialExpired = isTrialing && !trialActive;
+  const subscriptionActive = rawStatus === 'active' || trialActive;
+  const tier = subscriptionActive ? rawTier : 'free';
+  const trialMsRemaining = trialActive ? Math.max(0, trialEndsAt.getTime() - Date.now()) : 0;
+
+  return {
+    tier,
+    status: trialExpired ? 'trial_expired' : rawStatus,
+    trialActive,
+    trialExpired,
+    trialEndsAt: hasValidTrialEnd ? trialEndsAt.toISOString() : null,
+    trialDaysRemaining: trialActive ? Math.max(1, Math.ceil(trialMsRemaining / 86400000)) : 0,
+  };
+}
+
 // â”€â”€â”€ PASSWORD RESET CODES (in-memory store) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const resetCodes = new Map(); // email -> { code, expires, userId }
 const { Resend } = require('resend');
@@ -202,23 +228,32 @@ app.post('/register', async (req, res) => {
     }
     const hashedPassword = await bcrypt.hash(password, 10);
     const result = await pool.query(
-      `INSERT INTO users (email, password, subscription_tier, subscription_status, created_at)
-       VALUES ($1, $2, 'free', 'active', NOW())
-       RETURNING id, email`,
-      [email.toLowerCase(), hashedPassword]
+      `INSERT INTO users (email, password, subscription_tier, subscription_status, subscription_ends_at, created_at)
+       VALUES ($1, $2, 'pro', 'trialing', NOW() + ($3 * INTERVAL '1 day'), NOW())
+       RETURNING id, email, subscription_ends_at`,
+      [email.toLowerCase(), hashedPassword, AUTOMATIC_TRIAL_DAYS]
     );
     const user = result.rows[0];
     try {
       await pool.query(
         "INSERT INTO analytics_events (user_id, event_name, metadata) VALUES ($1, 'account_created', $2::jsonb)",
-        [user.id, JSON.stringify({ source: 'account_created' })]
+        [user.id, JSON.stringify({ source: 'account_created', automatic_trial_days: AUTOMATIC_TRIAL_DAYS })]
       );
     } catch (analyticsError) {
       // Analytics must never prevent a user from creating an account.
       console.error('Account analytics warning:', analyticsError);
     }
     const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
-    res.json({ token, user: { id: user.id, email: user.email } });
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        subscription_tier: 'pro',
+        subscription_status: 'trialing',
+        trial_ends_at: user.subscription_ends_at,
+      }
+    });
   } catch (err) {
     console.error('Register error:', err);
     res.status(500).json({ error: 'Kunne ikke oprette bruger' });
@@ -240,13 +275,16 @@ app.post('/login', async (req, res) => {
     if (!validPassword) {
       return res.status(401).json({ error: 'Forkert email eller adgangskode' });
     }
+    const access = resolveSubscriptionAccess(user);
     const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '30d' });
     res.json({
       token,
       user: {
         id: user.id,
         email: user.email,
-        subscription_tier: user.subscription_tier || 'free'
+        subscription_tier: access.tier,
+        subscription_status: access.status,
+        trial_ends_at: access.trialEndsAt,
       }
     });
   } catch (err) {
@@ -536,7 +574,8 @@ app.get('/subscription', authMiddleware, async (req, res) => {
       return res.status(404).json({ error: 'Bruger ikke fundet' });
     }
     const user = result.rows[0];
-    const tier = user.subscription_tier || 'free';
+    const access = resolveSubscriptionAccess(user);
+    const tier = access.tier;
     const tierConfig = TIERS[tier] || TIERS.free;
     const runsResult = await pool.query(`
       SELECT COUNT(*) as count FROM runs
@@ -547,8 +586,12 @@ app.get('/subscription', authMiddleware, async (req, res) => {
     const canTrackRun = tier === 'pro' || runsThisMonth < tierConfig.maxRunsPerMonth;
     res.json({
       tier,
-      status: user.subscription_status || 'active',
-      endsAt: user.subscription_ends_at,
+      status: access.status,
+      endsAt: access.trialEndsAt || user.subscription_ends_at,
+      trialActive: access.trialActive,
+      trialExpired: access.trialExpired,
+      trialEndsAt: access.trialEndsAt,
+      trialDaysRemaining: access.trialDaysRemaining,
       features: tierConfig.features,
       runsThisMonth,
       maxRunsPerMonth: tierConfig.maxRunsPerMonth,
@@ -565,15 +608,13 @@ async function checkActivityLimit(userId) {
   try {
     // Get user tier
     const userResult = await pool.query(
-      'SELECT subscription_tier, subscription_status FROM users WHERE id = $1',
+      'SELECT subscription_tier, subscription_status, subscription_ends_at FROM users WHERE id = $1',
       [userId]
     );
     if (userResult.rows.length === 0) {
       return { allowed: true }; // fail-open
     }
-    const { subscription_tier, subscription_status } = userResult.rows[0];
-    const isActive = subscription_status === 'active' || subscription_status === 'trialing';
-    const effectiveTier = isActive ? (subscription_tier || 'free') : 'free';
+    const effectiveTier = resolveSubscriptionAccess(userResult.rows[0]).tier;
 
     // Basic and Pro have no limit
     if (effectiveTier !== 'free') {
@@ -617,7 +658,7 @@ app.post('/subscription/activate', authMiddleware, async (req, res) => {
 
     // Opdater bruger til valgt tier
     await pool.query(
-      'UPDATE users SET subscription_tier = $1, subscription_status = $2, revenuecat_id = $3 WHERE id = $4',
+      'UPDATE users SET subscription_tier = $1, subscription_status = $2, subscription_ends_at = NULL, revenuecat_id = $3 WHERE id = $4',
       [validTier, 'active', revenueCatId || null, userId]
     );
 
@@ -639,7 +680,7 @@ app.get('/users/me/tier', authMiddleware, async (req, res) => {
   try {
     const userId = req.userId;
     const result = await pool.query(
-      'SELECT subscription_tier, subscription_status FROM users WHERE id = $1',
+      'SELECT subscription_tier, subscription_status, subscription_ends_at FROM users WHERE id = $1',
       [userId]
     );
 
@@ -648,12 +689,8 @@ app.get('/users/me/tier', authMiddleware, async (req, res) => {
     }
 
     const row = result.rows[0];
-    const status = row.subscription_status;
-    const rawTier = row.subscription_tier || 'free';
-
-    // If subscription is not active, treat as free
-    const isActive = status === 'active' || status === 'trialing';
-    const tier = isActive ? rawTier : 'free';
+    const access = resolveSubscriptionAccess(row);
+    const tier = access.tier;
 
     const isPro = tier === 'pro';
     const isBasic = tier === 'basic' || isPro; // Pro inherits Basic
@@ -661,10 +698,14 @@ app.get('/users/me/tier', authMiddleware, async (req, res) => {
 
     res.json({
       tier,
-      status,
+      status: access.status,
       isPro,
       isBasic,
       isFree,
+      trialActive: access.trialActive,
+      trialExpired: access.trialExpired,
+      trialEndsAt: access.trialEndsAt,
+      trialDaysRemaining: access.trialDaysRemaining,
       weeklyActivityLimit: isFree ? 3 : null,
       canUseMealTracking: isPro,
       canUseMealPlan: isPro,
