@@ -167,7 +167,10 @@ const FUNNEL_EVENTS = new Set([
   'onboarding_plan_created',
   'onboarding_plan_failed',
   'onboarding_completed',
+  'app_opened',
+  'activity_started',
   'first_activity_saved',
+  'activity_saved',
   'paywall_viewed',
   'paywall_plan_selected',
   'paywall_free_selected',
@@ -208,6 +211,30 @@ app.post('/analytics/event', authMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke gemme analytics-event' });
   }
 });
+
+async function recordSavedActivity(userId, metadata = {}) {
+  const sanitized = sanitizeAnalyticsMetadata(metadata);
+  const serialized = JSON.stringify(sanitized);
+
+  try {
+    await pool.query(
+      `INSERT INTO analytics_events (user_id, event_name, metadata)
+       SELECT $1, 'first_activity_saved', $2::jsonb
+       WHERE NOT EXISTS (
+         SELECT 1 FROM analytics_events
+         WHERE user_id = $1 AND event_name = 'first_activity_saved'
+       )`,
+      [userId, serialized]
+    );
+    await pool.query(
+      "INSERT INTO analytics_events (user_id, event_name, metadata) VALUES ($1, 'activity_saved', $2::jsonb)",
+      [userId, serialized]
+    );
+  } catch (error) {
+    // Analytics must never prevent an activity from being saved.
+    console.error('Activity analytics warning:', error.message);
+  }
+}
 
 const stravaIntegration = registerStravaEndpoints(app, pool, authMiddleware, {
   jwtSecret: JWT_SECRET,
@@ -1134,6 +1161,11 @@ app.post('/runs', authMiddleware, async (req, res) => {
     ]);
 
     const savedRun = result.rows[0];
+
+    await recordSavedActivity(req.userId, {
+      activity_type: savedRun.type || 'run',
+      source: run.source || 'app',
+    });
 
     // â”€â”€â”€ AUTO-LOG TO ACTIVE CHALLENGES â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     try {
@@ -2405,6 +2437,10 @@ app.post('/activities', authMiddleware, async (req, res) => {
     }
 
     await client.query('COMMIT');
+    await recordSavedActivity(req.userId, {
+      activity_type: activity.type,
+      source: activity.source || a.source || 'manual',
+    });
     res.json(activity);
   } catch (err) {
     await client.query('ROLLBACK');
