@@ -46,6 +46,7 @@ const TIERS = {
 };
 
 const AUTOMATIC_TRIAL_DAYS = 14;
+const EXPIRED_TRIAL_CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 function resolveSubscriptionAccess(user) {
   const rawTier = user?.subscription_tier || 'free';
@@ -56,7 +57,7 @@ function resolveSubscriptionAccess(user) {
   const trialActive = isTrialing
     && hasValidTrialEnd
     && trialEndsAt.getTime() > Date.now();
-  const trialExpired = isTrialing && !trialActive;
+  const trialExpired = rawStatus === 'trial_expired' || (isTrialing && !trialActive);
   const subscriptionActive = rawStatus === 'active' || trialActive;
   const tier = subscriptionActive ? rawTier : 'free';
   const trialMsRemaining = trialActive ? Math.max(0, trialEndsAt.getTime() - Date.now()) : 0;
@@ -69,6 +70,21 @@ function resolveSubscriptionAccess(user) {
     trialEndsAt: hasValidTrialEnd ? trialEndsAt.toISOString() : null,
     trialDaysRemaining: trialActive ? Math.max(1, Math.ceil(trialMsRemaining / 86400000)) : 0,
   };
+}
+
+async function expireFinishedAutomaticTrials() {
+  const result = await pool.query(`
+    UPDATE users
+       SET subscription_tier = 'free',
+           subscription_status = 'trial_expired'
+     WHERE subscription_status = 'trialing'
+       AND subscription_ends_at IS NOT NULL
+       AND subscription_ends_at <= NOW()
+  `);
+
+  if (result.rowCount > 0) {
+    console.log(`[Trials] Moved ${result.rowCount} expired automatic trial(s) to Free`);
+  }
 }
 
 // â”€â”€â”€ PASSWORD RESET CODES (in-memory store) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -4027,6 +4043,18 @@ app.get('/meals/summary-range', authMiddleware, async (req, res) => {
 registerStrengthEndpoints(app, pool, authMiddleware);
 registerMealPlanEndpoints(app, pool, authMiddleware);
 initFavoritesTable();
+
+expireFinishedAutomaticTrials().catch(error => {
+  console.error('[Trials] Initial cleanup warning:', error.message);
+});
+
+const expiredTrialCleanupTimer = setInterval(() => {
+  expireFinishedAutomaticTrials().catch(error => {
+    console.error('[Trials] Scheduled cleanup warning:', error.message);
+  });
+}, EXPIRED_TRIAL_CLEANUP_INTERVAL_MS);
+expiredTrialCleanupTimer.unref();
+
 app.listen(PORT, () => {
   console.log(`ðŸƒ RunWithAI server kÃ¸rer pÃ¥ port ${PORT}`);
   console.log(`ðŸ“¦ Version: 3.0.1-revenuecat`);
